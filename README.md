@@ -51,7 +51,7 @@ share / revoke ──► new epoch, reseal, and a signed record on QoreChain
 
 - **Sharing needs only an address.** Every QoreChain account can publish an ML-KEM-1024 key in the chain's KEM registry (`MsgRegisterKEMKey`, signed by its ML-DSA-87 key). Coffer reads it from `/qorechain/pqc/v1/kem/{address}` and seals to it. No key swapping, no invite links, no server holding secrets.
 - **Revoking means something.** A removed reader never gets the next epoch key, so they cannot open this version or any later one. Coffer lists every key in the file so you can rotate what they already saw.
-- **Tampering is caught.** The owner's ML-DSA-87 signature covers the reader list; the writer's covers the contents. Readers check both against the keys registered on chain. A hand-edited reader list, or a look-alike file sealed by someone else, is refused.
+- **Tampering is caught.** The owner's ML-DSA-87 signature covers the reader list; the writer's covers the contents. Readers check both against the keys registered on chain. A hand-edited reader list, or a file relabelled with someone else's name, is refused. A valid file from a different owner is a different matter: the CLI remembers each file's owner the first time it opens it and refuses a copy from anyone else.
 - **Rollbacks are caught.** Every share and revoke is a hybrid-signed transaction whose memo names the file and its epoch. Before opening, Coffer reads those records, so restoring a copy from before a revoke is refused.
 
 <p align="center"><img src="docs/media/prove.png" alt="The demo teammate opens the file, is revoked, then refused" width="70%"></p>
@@ -65,7 +65,7 @@ npx github:jenzylove/coffer share qor1...        # add a reader by address
 npx github:jenzylove/coffer revoke qor1...       # remove a reader, list keys to rotate
 npx github:jenzylove/coffer run -- npm start     # secrets in the child process env only
 npx github:jenzylove/coffer import               # move a dotenvx .env + .env.keys over
-npx github:jenzylove/coffer set KEY=value        # change a value; no plain text on disk
+npx github:jenzylove/coffer set KEY              # change a value (asks for it); no plain text on disk
 npx github:jenzylove/coffer status               # readers, epoch, signature check, history
 ```
 
@@ -94,6 +94,17 @@ On 17 Nov 2026 GitHub code search returned **2,284** public files containing `DO
 - Testnet only. The KEM registry has not been exercised end to end on mainnet yet.
 - QoreX does not offer KEM registration or decryption to apps yet, so Coffer keeps its own recovery phrase, the same way dotenvx keeps `.env.keys`.
 - No smart contracts: everything is native QoreChain transactions.
+- Keys and records are read from a QoreChain REST node (the browser goes through the Coffer server); the CLI can use your own node with `COFFER_REST`.
+- Files shared with the demo teammate are opened on the Coffer server by that teammate, which reports key names only.
+
+## Built with
+
+- [QoreSeal](https://github.com/qorechain) (`@qorechain/qoreseal`): ML-KEM-1024 envelopes, epoch keys, the KEM registry client
+- [QoreSign](https://github.com/qorechain) (`@qorechain/qoresign`): hybrid secp256k1 + ML-DSA-87 signing, key registration, message signatures
+- [CosmJS](https://github.com/cosmos/cosmjs) and `cosmjs-types`: transaction encoding
+- [noble](https://paulmillr.com/noble/) (`@noble/hashes`, `@noble/curves`) and [scure](https://github.com/paulmillr/scure-bip39) (`@scure/bip39`): hashing, secp256k1, recovery phrases
+- [eciesjs](https://github.com/ecies/js) and [dotenvx](https://dotenvx.com): reading dotenvx files for import (dotenvx is used in tests to make real fixtures)
+- [React](https://react.dev), [Vite](https://vitejs.dev) and [three.js](https://threejs.org): the web app
 
 ## Develop
 

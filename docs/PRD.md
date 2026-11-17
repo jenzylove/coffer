@@ -6,7 +6,7 @@ Deadline: **2 December 2026, 23:59 UTC.** Checks 3 to 5 Dec, jury 6 to 15 Dec, w
 
 ## One line
 
-Your `.env` file, locked to wallet addresses: commit it anywhere, share it with a teammate by typing their QoreChain address, take access back later, and nobody else can read it, not even a quantum computer years from now.
+Your `.env` file, locked to wallet addresses: commit it anywhere, share it with a teammate by typing their QoreChain address, take access back later, and nobody else can read it; the lock is ML-KEM-1024, built to hold against quantum computers.
 
 ## The problem (with evidence)
 
@@ -76,7 +76,7 @@ First ten seconds on the site: a field that says "Paste your public GitHub repo"
 | ML-KEM-1024 | QoreSeal sealing of every file and epoch key |
 | Registered recipient keys | Every reader's key read from the on-chain KEM registry |
 | ML-DSA key binding | KEM registration is hybrid-signed by the account's ML-DSA-87 key; recipient cards in hybrid mode |
-| Client-side encryption and decryption | CLI and browser only; no server ever sees plain text |
+| Client-side encryption and decryption | CLI and browser; the server only opens files shared with its demo teammate |
 
 Also: the fest FAQ says jurors read the QCAI contract-audit reports. If no contract ships, say so in the README; if any contract ships, run both audit stages and answer the findings.
 

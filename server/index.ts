@@ -10,7 +10,7 @@ import { identityFromMnemonic } from "../src/core/identity.ts";
 import { parseCoffer, verifyCoffer, openCoffer, CofferError } from "../src/core/vault.ts";
 import { parseDotenv } from "../src/core/dotenv.ts";
 import { scanDotenvx } from "../src/core/dotenvx.ts";
-import { TESTNET, MIN_UQOR, accountStatus, fetchPqKeys, grantHistory, registerIdentity, sendTx, ChainError } from "../src/chain/qore.ts";
+import { TESTNET, MIN_UQOR, accountStatus, fetchPqKeys, latestEpoch, registerIdentity, sendTx, ChainError } from "../src/chain/qore.ts";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const net = TESTNET;
@@ -52,8 +52,11 @@ class HttpError extends Error {
 }
 
 function clientIp(req: IncomingMessage): string {
+  // Railway's edge appends the real client address as the LAST X-Forwarded-For entry;
+  // earlier entries come from the client and can be forged.
   const f = req.headers["x-forwarded-for"];
-  return (Array.isArray(f) ? f[0] : f)?.split(",")[0]?.trim() || req.socket.remoteAddress || "unknown";
+  const hops = (Array.isArray(f) ? f.join(",") : f ?? "").split(",").map((h) => h.trim()).filter(Boolean);
+  return hops[hops.length - 1] || req.socket.remoteAddress || "unknown";
 }
 
 // One transaction at a time from the relayer: sequence numbers must not race.
@@ -78,21 +81,24 @@ async function drip(req: IncomingMessage, res: ServerResponse) {
   if (drips.some((d) => d.address === address)) throw new HttpError(429, "this address was already funded today");
   if (drips.filter((d) => d.ip === ip).length >= PER_IP_DAY) throw new HttpError(429, `limit reached: ${PER_IP_DAY} new addresses per day from one network`);
   if (drips.length >= GLOBAL_DAY) throw new HttpError(429, "the relayer's daily budget is used up; try tomorrow or use the faucet");
-  const st = await accountStatus(net, address);
-  const setUp = st.mldsa && st.kem;
-  if (setUp && st.uqor >= MIN_UQOR) throw new HttpError(409, "this address is set up and still has QOR");
-  if (!setUp && st.uqor >= 60_000n) throw new HttpError(409, "this address already has enough QOR for setup");
-  const rel = await accountStatus(net, relayer.address);
-  if (rel.uqor < RELAYER_FLOOR + DRIP_UQOR) throw new HttpError(503, "the relayer is out of test QOR; the owner tops it up from the faucet");
-  drips.push({ at: now, ip, address });
+  // Reserve before any await so parallel requests cannot pass the checks twice.
+  const slot = { at: now, ip, address };
+  drips.push(slot);
+  const release = () => { const i = drips.indexOf(slot); if (i >= 0) drips.splice(i, 1); };
   try {
+    const st = await accountStatus(net, address);
+    const setUp = st.mldsa && st.kem;
+    if (setUp && st.uqor >= MIN_UQOR) throw new HttpError(409, "this address is set up and still has QOR");
+    if (!setUp && st.uqor >= 60_000n) throw new HttpError(409, "this address already has enough QOR for setup");
+    const rel = await accountStatus(net, relayer.address);
+    if (rel.uqor < RELAYER_FLOOR + DRIP_UQOR) throw new HttpError(503, "the relayer is out of test QOR; the owner tops it up from the faucet");
     const t = await serial(() => sendTx(net, relayer, [{
       typeUrl: "/cosmos.bank.v1beta1.MsgSend",
       value: MsgSend.encode(MsgSend.fromPartial({ fromAddress: relayer.address, toAddress: address, amount: [{ denom: "uqor", amount: DRIP_UQOR.toString() }] })).finish(),
     }], { memo: "coffer drip: setup fees" }));
     send(res, 200, { hash: t.hash, uqor: DRIP_UQOR });
   } catch (e) {
-    drips.pop();
+    release();
     throw e;
   }
 }
@@ -106,8 +112,9 @@ async function teammateOpen(req: IncomingMessage, res: ServerResponse) {
     const f = parseCoffer(file);
     if (f.chainId !== net.chainId) throw new CofferError("WRONG_CHAIN", `this file is for ${f.chainId}`);
     verifyCoffer(f, await fetchPqKeys(net, [f.owner, f.writer]));
-    const top = (await grantHistory(net, f.owner, f.id)).reduce((m, g) => (g.epoch > m ? g.epoch : m), 0n);
+    const top = await latestEpoch(net, f.owner, f.id);
     if (f.epoch < top) throw new CofferError("ROLLBACK", `this is epoch ${f.epoch}, but the owner announced epoch ${top} on chain: an old copy`);
+    if (f.epoch > top) throw new CofferError("UNRECORDED", `this is epoch ${f.epoch}, but the owner's latest record on chain is ${top === 0n ? "missing" : `epoch ${top}`}`);
     const keys = parseDotenv(new TextDecoder().decode(openCoffer(f, teammate.sealKeys))).map((e) => e.key);
     send(res, 200, { opened: true, keys, epoch: f.epoch, version: f.version, verified: true });
   } catch (e) {
@@ -169,6 +176,7 @@ async function scan(req: IncomingMessage, res: ServerResponse, url: URL) {
   }));
   files.sort((a, b) => a.path.localeCompare(b.path));
   const body = { repo, branch, files, truncated: !!tree.truncated };
+  if (scanCache.size >= 500) scanCache.delete(scanCache.keys().next().value!);
   scanCache.set(repo.toLowerCase(), { at: Date.now(), body });
   send(res, 200, body);
 }
@@ -178,6 +186,7 @@ async function scan(req: IncomingMessage, res: ServerResponse, url: URL) {
 async function proxy(req: IncomingMessage, res: ServerResponse, url: URL) {
   const path = url.pathname.slice("/rest".length);
   if (!/^\/(cosmos|qorechain)\//.test(path)) throw new HttpError(404, "not a QoreChain REST path");
+  if (req.method !== "GET" && req.method !== "POST") throw new HttpError(405, "method not allowed");
   const body = req.method === "POST" ? Buffer.from(JSON.stringify(await readBody(req, 2 * 1024 * 1024))) : undefined;
   const r = await fetch(`${net.rest}${path}${url.search}`, { method: req.method, headers: body ? { "content-type": "application/json" } : {}, body });
   res.writeHead(r.status, { "content-type": r.headers.get("content-type") ?? "application/json", "cache-control": "no-store" });
@@ -193,7 +202,9 @@ const TYPES: Record<string, string> = {
 };
 
 async function serveStatic(res: ServerResponse, pathname: string) {
-  const safe = normalize(decodeURIComponent(pathname)).replace(/^(\.\.[/\\])+/, "");
+  let decoded: string;
+  try { decoded = decodeURIComponent(pathname); } catch { throw new HttpError(400, "bad URL"); }
+  const safe = normalize(decoded).replace(/^(\.\.[/\\])+/, "");
   let file = join(DIST, safe);
   if (!file.startsWith(DIST)) throw new HttpError(404, "not found");
   try {

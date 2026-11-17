@@ -64,7 +64,8 @@ export function OpenFile() {
             {busy || !check ? <p className="muted">Checking signatures and the chain record on QoreChain…</p> : check.ok ? (
               <>
                 <p className="beat-word t-open display">Checks out</p>
-                <p>The owner's and the writer's ML-DSA-87 signatures match the keys registered on QoreChain, and this copy is not older than the owner's latest record.</p>
+                <p>The owner's and the writer's ML-DSA-87 signatures match the keys registered on QoreChain, and this copy matches the owner's latest record.</p>
+                <p>Owner: <span className="mono">{file.owner}</span>. A valid signature proves who made the file, not that you know them: make sure this is your teammate's address before you use the values.</p>
               </>
             ) : (
               <>

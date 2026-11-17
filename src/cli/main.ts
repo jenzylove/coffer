@@ -2,7 +2,8 @@
 // coffer: .env files sealed to QoreChain addresses.
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, basename } from "node:path";
+import { join, basename, resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { identityFromMnemonic, newMnemonic, type Identity } from "../core/identity.ts";
 import {
@@ -12,7 +13,7 @@ import {
 import { parseDotenv, serializeDotenv, toRecord, type DotenvEntry } from "../core/dotenv.ts";
 import { importDotenvx, scanDotenvx } from "../core/dotenvx.ts";
 import {
-  TESTNET, accountStatus, fetchReader, fetchPqKeys, registerIdentity, MIN_UQOR, recordGrant, grantHistory,
+  TESTNET, accountStatus, fetchReader, fetchPqKeys, registerIdentity, MIN_UQOR, recordGrant, grantHistory, latestEpoch,
   ChainError, type Network, type TxResult,
 } from "../chain/qore.ts";
 
@@ -20,6 +21,7 @@ const net: Network = { ...TESTNET, rest: process.env.COFFER_REST ?? TESTNET.rest
 const HOME = process.env.COFFER_HOME ?? join(homedir(), ".coffer");
 const ID_FILE = join(HOME, "identity");
 const SEEN_FILE = join(HOME, "seen.json");
+const PINS_FILE = join(HOME, "owners.json");
 const RELAYER = process.env.COFFER_RELAYER ?? "https://coffer.jdollar.site/api/drip";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -103,17 +105,41 @@ function remember(f: CofferFile) {
   writeFileSync(SEEN_FILE, JSON.stringify(s, null, 2));
 }
 
-/** Signatures against chain keys, the chain's latest announced epoch, and the local high-water mark. */
-async function checkFile(f: CofferFile, opts: { offline?: boolean } = {}) {
+// Owner pins: the first owner this machine sees at a path is remembered. A file
+// that turns up later at the same path with a different owner is refused: anyone
+// with write access to the repo could otherwise replace it with a file they own,
+// sealed to you, and read whatever you write into it next.
+type Pins = Record<string, string>;
+function pins(): Pins {
+  try { return JSON.parse(readFileSync(PINS_FILE, "utf8")); } catch { return {}; }
+}
+function pin(path: string, owner: string) {
+  const p = pins();
+  p[resolve(path)] = owner;
+  mkdirSync(HOME, { recursive: true });
+  writeFileSync(PINS_FILE, JSON.stringify(p, null, 2));
+}
+function checkOwner(path: string, f: CofferFile, accept: boolean) {
+  const known = pins()[resolve(path)];
+  if (known && known !== f.owner && !accept) {
+    throw new CofferError("OWNER_CHANGED", `${path} used to belong to ${known}; this copy belongs to ${f.owner}. Someone may have replaced the file to read what you write next. If the owner really changed, run again with --accept-owner.`);
+  }
+  if (!known) console.error(c.dim(`owner of ${path}: ${f.owner} (first time on this machine; make sure this is your teammate)`));
+  pin(path, f.owner);
+}
+
+/** Signatures against chain keys, the owner pin, the chain's grant record, and the local high-water mark. */
+async function checkFile(f: CofferFile, opts: { offline?: boolean; path?: string; acceptOwner?: boolean } = {}) {
+  if (opts.path) checkOwner(opts.path, f, !!opts.acceptOwner);
   if (opts.offline) {
     console.error(c.red("warning: --offline skips the signature and rollback checks against QoreChain"));
     return;
   }
   const keys = await fetchPqKeys(net, [f.owner, f.writer]);
   verifyCoffer(f, keys);
-  const hist = await grantHistory(net, f.owner, f.id);
-  const top = hist.reduce((m, g) => (g.epoch > m ? g.epoch : m), 0n);
+  const top = await latestEpoch(net, f.owner, f.id);
   if (f.epoch < top) throw new CofferError("ROLLBACK", `this file is epoch ${f.epoch} but its owner announced epoch ${top} on chain: it is an old copy (someone may have restored a version a removed reader can still open)`);
+  if (f.epoch > top) throw new CofferError("UNRECORDED", `this file is epoch ${f.epoch} but its owner's latest record on chain is ${top === 0n ? "missing" : `epoch ${top}`}. Coffer records every change before writing the file, so this copy was not made by Coffer or its record failed. The owner can run "coffer record".`);
   const s = seen()[f.id];
   if (s && (f.epoch < BigInt(s.epoch) || (f.epoch === BigInt(s.epoch) && f.version < BigInt(s.version)))) {
     throw new CofferError("ROLLBACK", `this machine already saw epoch ${s.epoch} version ${s.version} of this file; this copy is older (epoch ${f.epoch} version ${f.version})`);
@@ -179,8 +205,9 @@ async function lock(pos: string[], flags: Record<string, string | true>) {
   const id = loadIdentity();
   await ensureReady(id);
   if (existsSync(sealedPath)) {
+    if (typeof flags.to === "string") throw new CofferError("USAGE", `${sealedPath} already exists; add readers with "coffer share <qor1...>"`);
     const f = readSealed(sealedPath);
-    await checkFile(f);
+    await checkFile(f, { path: sealedPath, acceptOwner: flags["accept-owner"] === true });
     const g = updateCoffer(f, id, id.sealKeys, enc.encode(serializeDotenv(entries)));
     writeSealed(sealedPath, g);
     say(`${c.green("sealed")} ${entries.length} values into ${sealedPath} ${c.dim(`(version ${g.version}, readers unchanged: ${g.readers.length})`)}`);
@@ -188,9 +215,10 @@ async function lock(pos: string[], flags: Record<string, string | true>) {
     const to = typeof flags.to === "string" ? flags.to.split(",") : [];
     const readers = await Promise.all(to.map((a) => fetchReader(net, a.trim())));
     const f = createCoffer({ chainId: net.chainId, name: plainName(sealedPath), owner: id, ownerMlkem: id.sealKeys.mlkemPublicKey, readers, plaintext: enc.encode(serializeDotenv(entries)) });
-    writeSealed(sealedPath, f);
-    say(`${c.green("sealed")} ${entries.length} values into ${sealedPath}`);
     const txs = await recordGrant(net, id, { op: "create", fileId: f.id, epoch: f.epoch, version: f.version, added: readers.map((r) => r.address), removed: [] });
+    writeSealed(sealedPath, f);
+    pin(sealedPath, f.owner);
+    say(`${c.green("sealed")} ${entries.length} values into ${sealedPath}`);
     txs.forEach((t) => txLine("recorded on chain", t));
   }
   say(c.dim(`  commit ${sealedPath}. You can delete ${plain} once your team has it; "coffer run" never needs it.`));
@@ -198,8 +226,9 @@ async function lock(pos: string[], flags: Record<string, string | true>) {
 
 async function run(flags: Record<string, string | true>, rest: string[]) {
   if (!rest.length) throw new CofferError("USAGE", `usage: coffer run [-f .env.coffer] -- <command>`);
-  const f = readSealed(resolveSealed(flags));
-  await checkFile(f, { offline: flags.offline === true });
+  const path = resolveSealed(flags);
+  const f = readSealed(path);
+  await checkFile(f, { offline: flags.offline === true, path, acceptOwner: flags["accept-owner"] === true });
   const id = loadIdentity();
   const vars = toRecord(entriesOf(f, id));
   remember(f);
@@ -225,13 +254,13 @@ async function share(pos: string[], flags: Record<string, string | true>) {
   if (!pos.length) throw new CofferError("USAGE", "usage: coffer share <qor1 address>... [-f .env.coffer]");
   const path = resolveSealed(flags);
   const f = readSealed(path);
-  await checkFile(f);
+  await checkFile(f, { path: path, acceptOwner: flags["accept-owner"] === true });
   const id = loadIdentity();
   const readers = await Promise.all(pos.map((a) => fetchReader(net, a)));
   const g = shareCoffer(f, id, id.sealKeys, readers);
+  const txs = await recordGrant(net, id, { op: "share", fileId: g.id, epoch: g.epoch, version: g.version, added: readers.map((r) => r.address), removed: [] });
   writeSealed(path, g);
   say(`${c.green("shared")} ${path} with ${readers.length} reader(s); epoch ${g.epoch}`);
-  const txs = await recordGrant(net, id, { op: "share", fileId: g.id, epoch: g.epoch, version: g.version, added: readers.map((r) => r.address), removed: [] });
   txs.forEach((t) => txLine("recorded on chain", t));
   say(c.dim(`  commit ${path} so they get it.`));
 }
@@ -240,17 +269,17 @@ async function revoke(pos: string[], flags: Record<string, string | true>) {
   if (!pos.length) throw new CofferError("USAGE", "usage: coffer revoke <qor1 address>... [-f .env.coffer]");
   const path = resolveSealed(flags);
   const f = readSealed(path);
-  await checkFile(f);
+  await checkFile(f, { path: path, acceptOwner: flags["accept-owner"] === true });
   const id = loadIdentity();
   const { file, rotate } = revokeCoffer(f, id, id.sealKeys, pos, (p) => parseDotenv(dec.decode(p)).map((e) => e.key));
+  const txs = await recordGrant(net, id, { op: "revoke", fileId: file.id, epoch: file.epoch, version: file.version, added: [], removed: pos });
   writeSealed(path, file);
   say(`${c.green("revoked")} ${pos.length} reader(s); epoch ${file.epoch}. They cannot open this or any later version.`);
-  const txs = await recordGrant(net, id, { op: "revoke", fileId: file.id, epoch: file.epoch, version: file.version, added: [], removed: pos });
   txs.forEach((t) => txLine("recorded on chain", t));
   say();
   say(c.bold("They may still have the values they already read. Rotate these at the provider:"));
   for (const k of rotate) say(`  ${k}`);
-  say(c.dim(`  then: coffer set KEY=newvalue -f ${path}`));
+  say(c.dim(`  then: coffer set KEY -f ${path}   (asks for the new value)`));
 }
 
 async function importCmd(pos: string[], flags: Record<string, string | true>) {
@@ -268,18 +297,19 @@ async function importCmd(pos: string[], flags: Record<string, string | true>) {
   const to = typeof flags.to === "string" ? flags.to.split(",") : [];
   const readers = await Promise.all(to.map((a) => fetchReader(net, a.trim())));
   const f = createCoffer({ chainId: net.chainId, name: plainName(sealedPath), owner: id, ownerMlkem: id.sealKeys.mlkemPublicKey, readers, plaintext: enc.encode(serializeDotenv(imp.entries)) });
-  writeSealed(sealedPath, f);
-  say(`${c.green("moved")} ${imp.entries.length} values from dotenvx (secp256k1) to ${sealedPath} (ML-KEM-1024)`);
   const txs = await recordGrant(net, id, { op: "create", fileId: f.id, epoch: f.epoch, version: f.version, added: readers.map((r) => r.address), removed: [] });
+  writeSealed(sealedPath, f);
+  pin(sealedPath, f.owner);
+  say(`${c.green("moved")} ${imp.entries.length} values from dotenvx (secp256k1) to ${sealedPath} (ML-KEM-1024)`);
   txs.forEach((t) => txLine("recorded on chain", t));
   say(c.dim(`  the dotenvx copy in your git history stays readable to anyone with ${keysPath}, and to a quantum computer later. Rotate these values when you can.`));
 }
 
 async function setCmd(pos: string[], flags: Record<string, string | true>, unset = false) {
-  if (!pos.length) throw new CofferError("USAGE", unset ? "usage: coffer unset KEY..." : "usage: coffer set KEY=value...");
+  if (!pos.length) throw new CofferError("USAGE", unset ? "usage: coffer unset KEY..." : "usage: coffer set KEY (asks for the value) or KEY=value");
   const path = resolveSealed(flags);
   const f = readSealed(path);
-  await checkFile(f);
+  await checkFile(f, { path: path, acceptOwner: flags["accept-owner"] === true });
   const id = loadIdentity();
   const entries = entriesOf(f, id);
   for (const p of pos) {
@@ -289,8 +319,10 @@ async function setCmd(pos: string[], flags: Record<string, string | true>, unset
       entries.splice(i, 1);
     } else {
       const eq = p.indexOf("=");
-      if (eq < 1) throw new CofferError("USAGE", `expected KEY=value, got ${p.split("=")[0]}`);
-      const key = p.slice(0, eq), value = p.slice(eq + 1);
+      // KEY alone: ask for the value so it never lands in shell history
+      const key = eq < 0 ? p : p.slice(0, eq);
+      if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(key)) throw new CofferError("USAGE", `not a valid name: ${key}`);
+      const value = eq < 0 ? await askHidden(`value for ${key}: `) : p.slice(eq + 1);
       const e = entries.find((x) => x.key === key);
       if (e) e.value = value; else entries.push({ key, value });
     }
@@ -301,8 +333,9 @@ async function setCmd(pos: string[], flags: Record<string, string | true>, unset
 }
 
 async function keys(flags: Record<string, string | true>) {
-  const f = readSealed(resolveSealed(flags));
-  await checkFile(f, { offline: flags.offline === true });
+  const path = resolveSealed(flags);
+  const f = readSealed(path);
+  await checkFile(f, { offline: flags.offline === true, path, acceptOwner: flags["accept-owner"] === true });
   for (const e of entriesOf(f, loadIdentity())) say(e.key);
 }
 
@@ -310,7 +343,8 @@ async function status(flags: Record<string, string | true>) {
   const path = resolveSealed(flags);
   const f = readSealed(path);
   say(`${c.bold(path)}  ${c.dim(`file ${f.id} · ${f.chainId}`)}`);
-  say(`  owner    ${f.owner}`);
+  const known = pins()[resolve(path)];
+  say(`  owner    ${f.owner}${known && known !== f.owner ? c.red(`  (CHANGED: this machine knew ${known})`) : ""}`);
   say(`  epoch    ${f.epoch}   version ${f.version}   last written by ${f.writer === f.owner ? "owner" : f.writer}`);
   say(`  readers  ${f.readers.length}`);
   for (const r of f.readers) say(`    ${r}${r === f.owner ? c.dim("  (owner)") : ""}`);
@@ -329,6 +363,35 @@ async function status(flags: Record<string, string | true>) {
   }
 }
 
+function askHidden(prompt: string): Promise<string> {
+  return new Promise((ok) => {
+    const tty = !!process.stdin.isTTY;
+    const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: tty });
+    if (tty) {
+      process.stdout.write(prompt);
+      (rl as unknown as { _writeToOutput: (s: string) => void })._writeToOutput = () => {};
+    }
+    rl.question(tty ? "" : prompt, (v) => {
+      rl.close();
+      if (tty) process.stdout.write("\n");
+      ok(v);
+    });
+  });
+}
+
+/** Re-send the chain record for the file's current epoch if it is missing. Owner only. */
+async function recordCmd(flags: Record<string, string | true>) {
+  const path = resolveSealed(flags);
+  const f = readSealed(path);
+  const id = loadIdentity();
+  if (id.address !== f.owner) throw new CofferError("NOT_OWNER", "only the owner records changes to this file");
+  verifyCoffer(f, await fetchPqKeys(net, [f.owner, f.writer]));
+  const top = await latestEpoch(net, f.owner, f.id);
+  if (top >= f.epoch) return say(`epoch ${f.epoch} is already recorded on chain`);
+  const txs = await recordGrant(net, id, { op: "share", fileId: f.id, epoch: f.epoch, version: f.version, added: f.readers.filter((r) => r !== f.owner), removed: [] });
+  txs.forEach((t) => txLine("recorded on chain", t));
+}
+
 const HELP = `coffer: push your secrets to GitHub. Only your team can open them.
 
   coffer init                      make your identity and publish your keys on QoreChain
@@ -338,11 +401,13 @@ const HELP = `coffer: push your secrets to GitHub. Only your team can open them.
   coffer run [-f file] -- <cmd>    run a command with the secrets in its environment only
   coffer share <qor1...>           add readers (new epoch, recorded on chain)
   coffer revoke <qor1...>          remove readers and list the keys to rotate
-  coffer set KEY=value | unset KEY change values without writing plain text to disk
+  coffer set KEY | unset KEY       change a value (it asks for it); nothing plain on disk
+  coffer record                    re-send the chain record for the current epoch (owner)
   coffer keys                      list the names in the file
   coffer status                    readers, epoch, signature check, on-chain history
 
   -f, --file <path>   sealed file (default .env.coffer)
+  --accept-owner      trust a file whose owner changed since this machine last saw it
   COFFER_IDENTITY     recovery phrase, for servers and CI (instead of ~/.coffer/identity)
 `;
 
@@ -360,6 +425,7 @@ async function main() {
     case "unset": return setCmd(pos, flags, true);
     case "keys": return keys(flags);
     case "status": return status(flags);
+    case "record": return recordCmd(flags);
     default: process.stdout.write(HELP);
   }
 }

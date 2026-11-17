@@ -211,23 +211,33 @@ export async function recordGrant(net: Network, owner: Identity, g: Grant): Prom
 }
 
 /** Grant records the owner put on chain, newest first, optionally for one file. */
-export async function grantHistory(net: Network, owner: string, id?: string, limit = 100): Promise<GrantRecord[]> {
+export async function grantHistory(net: Network, owner: string, id?: string, opts: { pageSize?: number; maxPages?: number; stopAtFirst?: boolean } = {}): Promise<GrantRecord[]> {
+  const pageSize = opts.pageSize ?? 100;
+  const maxPages = opts.maxPages ?? 20;
   const q = encodeURIComponent(`message.sender='${owner}'`);
-  const b = await get(net, `/cosmos/tx/v1beta1/txs?query=${q}&order_by=ORDER_BY_DESC&limit=${limit}`);
   const out: GrantRecord[] = [];
-  for (const t of b.tx_responses ?? []) {
-    // only self-sends signed by the owner count; the memo of anything else is ignored
-    const msgs = t.tx?.body?.messages ?? [];
-    if (msgs.length !== 1 || msgs[0]["@type"] !== "/cosmos.bank.v1beta1.MsgSend" || msgs[0].from_address !== owner || msgs[0].to_address !== owner || t.code !== 0) continue;
-    const g = parseGrantMemo(t.tx.body.memo ?? "");
-    if (!g || (id && g.fileId !== id)) continue;
-    out.push({ ...g, hash: t.txhash, height: Number(t.height), time: t.timestamp, owner });
+  for (let page = 1; page <= maxPages; page++) {
+    const b = await get(net, `/cosmos/tx/v1beta1/txs?query=${q}&order_by=ORDER_BY_DESC&page=${page}&limit=${pageSize}`);
+    const txs = b.tx_responses ?? [];
+    for (const t of txs) {
+      // only self-sends signed by the owner count; the memo of anything else is ignored
+      const msgs = t.tx?.body?.messages ?? [];
+      if (msgs.length !== 1 || msgs[0]["@type"] !== "/cosmos.bank.v1beta1.MsgSend" || msgs[0].from_address !== owner || msgs[0].to_address !== owner || t.code !== 0) continue;
+      const g = parseGrantMemo(t.tx.body.memo ?? "");
+      if (!g || (id && g.fileId !== id)) continue;
+      out.push({ ...g, hash: t.txhash, height: Number(t.height), time: t.timestamp, owner });
+      if (opts.stopAtFirst) return out;
+    }
+    const total = Number(b.total ?? b.pagination?.total ?? 0);
+    if (txs.length < pageSize || (total && page * pageSize >= total)) return out;
   }
+  // Ran out of pages before reaching the start of the owner's history: refuse rather than guess.
+  if (opts.stopAtFirst && id) throw new ChainError("HISTORY_TOO_LONG", `could not find this file's record in the owner's last ${pageSize * maxPages} transactions`);
   return out;
 }
 
-/** The highest epoch the owner has announced on chain for a file (0 if none). A file below it is a rollback. */
+/** The epoch of the owner's newest record for a file (0 if none). Records only move forward, so the newest is the highest. */
 export async function latestEpoch(net: Network, owner: string, id: string): Promise<bigint> {
-  const h = await grantHistory(net, owner, id);
-  return h.reduce((m, g) => (g.epoch > m ? g.epoch : m), 0n);
+  const h = await grantHistory(net, owner, id, { stopAtFirst: true });
+  return h[0]?.epoch ?? 0n;
 }

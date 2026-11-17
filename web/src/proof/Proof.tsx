@@ -110,7 +110,7 @@ export default function Proof() {
         <Reveal as="section" className="psect">
           <h2 className="psect-t"><span className="mono shead-n">04</span>The Coffer server, right now</h2>
           <Live />
-          <p className="muted">The server pays setup fees for new addresses and runs the demo teammate. It never receives a value: sealing and opening happen in your browser or terminal.</p>
+          <p className="muted">The server pays setup fees for new addresses and runs the demo teammate. It never receives your values: sealing and opening happen in your browser or terminal. Files shared with the demo teammate are opened by that teammate on the server, which reports names only.</p>
         </Reveal>
       </div>
     </Page>

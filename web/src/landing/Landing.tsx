@@ -118,7 +118,15 @@ export function Landing() {
           <div className="rules">
             <Reveal className="rule-row">
               <h3>No server sees your values</h3>
-              <p>Sealing and opening happen in your terminal or in this browser. The Coffer server relays requests to QoreChain and pays setup fees. It never receives a value.</p>
+              <p>Sealing and opening happen in your terminal or in this browser. The Coffer server relays requests to QoreChain and pays setup fees; it never receives your values. The one exception is a file you share with the demo teammate: that reader runs on the server and opens it like any reader would, then reports only the names.</p>
+            </Reveal>
+            <Reveal className="rule-row">
+              <h3>A signature proves who, not whether you know them</h3>
+              <p>Anyone can make a valid Coffer file and seal it to your address. The CLI remembers who owned each file the first time you open it and refuses a copy from a different owner, so a swapped file can't trick you into running its values or sealing new ones to a stranger. In the browser, check the owner shown before you use a file.</p>
+            </Reveal>
+            <Reveal className="rule-row">
+              <h3>Keys come from a QoreChain node</h3>
+              <p>Reader keys, signing keys and records are read from a QoreChain REST node, through the Coffer server in the browser. The CLI can point at your own node with <code>COFFER_REST</code>.</p>
             </Reveal>
             <Reveal className="rule-row">
               <h3>Your recovery phrase opens everything shared with you</h3>

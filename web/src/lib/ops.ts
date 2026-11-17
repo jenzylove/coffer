@@ -69,6 +69,7 @@ export async function checkFile(f: CofferFile): Promise<CheckResult> {
   const history = await grantHistory(net, f.owner, f.id);
   const top = history.reduce((m, g) => (g.epoch > m ? g.epoch : m), 0n);
   if (f.epoch < top) throw new CofferError("ROLLBACK", `this file is epoch ${f.epoch} but its owner announced epoch ${top} on chain: it is an old copy (someone may have restored a version a removed reader can still open)`);
+  if (f.epoch > top) throw new CofferError("UNRECORDED", `this file is epoch ${f.epoch} but its owner's latest record on chain is ${top === 0n ? "missing" : `epoch ${top}`}`);
   const s = seen()[f.id];
   if (s && (f.epoch < BigInt(s.epoch) || (f.epoch === BigInt(s.epoch) && f.version < BigInt(s.version)))) {
     throw new CofferError("ROLLBACK", `this browser already saw epoch ${s.epoch} version ${s.version} of this file; this copy is older (epoch ${f.epoch} version ${f.version})`);
@@ -82,6 +83,7 @@ export function explain(code: string | undefined, message: string): string {
     case "NOT_A_READER": return "Not a reader: this address can't open this version of the file.";
     case "BAD_SIGNATURE": return "The signatures don't match: someone changed this file by hand.";
     case "ROLLBACK": return "This is an old copy. The owner has published a newer version on chain.";
+    case "UNRECORDED": return "The chain has no record of this version. Coffer records every change before it counts, so this copy was not made by Coffer, or its owner still needs to record it.";
     case "UNKNOWN_KEY": return "The signer has no signing key on QoreChain, so the file can't be checked.";
     case "WRITER_NOT_READER": return "The last writer is not a reader of this file.";
     case "BAD_FORMAT": return `This is not a Coffer file (${message}).`;

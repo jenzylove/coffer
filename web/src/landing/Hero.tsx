@@ -148,7 +148,7 @@ export function Hero() {
           <p className="eyebrow">Coffer, for developers and teams who keep secrets in .env files</p>
           <h1 id="hero-title" className="display">Push your secrets to GitHub. <em>Only your team can open them.</em></h1>
           <ScanDoor />
-          <p className="lede hero-lede">Coffer seals your <code>.env</code> into a file that is safe to commit to any repo, public or private. Share it by typing a teammate's address. Take access back the same way. A quantum computer later can't open it either.</p>
+          <p className="lede hero-lede">Coffer seals your <code>.env</code> into a file that is safe to commit to any repo, public or private. Share it by typing a teammate's address. Take access back the same way. The lock is ML-KEM-1024, built to hold against quantum computers.</p>
         </div>
 
         <figure className={`stage stage-${phase}`} aria-label="Live demo: a .env file sealed, shared, revoked and opened in your browser">
