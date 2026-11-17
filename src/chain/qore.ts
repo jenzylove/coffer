@@ -82,8 +82,22 @@ export async function fetchPqKeys(net: Network, addresses: string[]): Promise<Re
 
 export interface TxResult { hash: string; height: number; gasUsed: number; feeUqor: number }
 
-/** Sign (hybrid unless the account has no ML-DSA key yet) and send one native transaction; waits until committed. */
+/**
+ * Sign (hybrid unless the account has no ML-DSA key yet) and send one native transaction; waits until committed.
+ * Right after a commit the REST node can still report the old sequence, so a sequence mismatch is retried.
+ */
 export async function sendTx(net: Network, id: Identity, msgs: { typeUrl: string; value: Uint8Array }[], opts: { mode?: "hybrid" | "classicalOnly"; memo?: string } = {}): Promise<TxResult> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await sendOnce(net, id, msgs, opts);
+    } catch (e) {
+      if (attempt >= 4 || !/sequence mismatch/i.test((e as Error).message)) throw e;
+      await new Promise((ok) => setTimeout(ok, 2500));
+    }
+  }
+}
+
+async function sendOnce(net: Network, id: Identity, msgs: { typeUrl: string; value: Uint8Array }[], opts: { mode?: "hybrid" | "classicalOnly"; memo?: string }): Promise<TxResult> {
   const mode = opts.mode ?? "hybrid";
   const info = await fetch(`${net.rest}/cosmos/auth/v1beta1/account_info/${id.address}`).then((r) => r.json() as Promise<any>);
   if (!info?.info) throw new ChainError("NO_FUNDS", `${id.address} has never received QOR, so it cannot send transactions yet`);

@@ -239,7 +239,7 @@ export function verifyCoffer(f: CofferFile, pqKeys: Record<string, Uint8Array>):
 const HEADER = [
   "# Sealed by Coffer. Safe to commit: only the readers below can open it.",
   "# ML-KEM-1024 + AES-256-GCM to QoreChain addresses, signed with ML-DSA-87.",
-  "# Run with it: npx @jenzylove/coffer run -- <command>",
+  "# Run with it: npx github:jenzylove/coffer run -- <command>",
 ];
 
 const sigText = (s: MessageSignature) => toBase64Url(enc.encode(JSON.stringify(s)));
