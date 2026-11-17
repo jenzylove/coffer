@@ -10,7 +10,6 @@ import { buildRegisterPqKeyMessage, signHybrid, toHex } from "@qorechain/qoresig
 import { fetchPqKeyStatus, simulateTx, submitWithSignBytesFallback } from "@qorechain/qoresign/network";
 import { buildRegisterKemKeyMessage, describeKemRegistryError } from "@qorechain/qoreseal";
 import { fetchKemKey } from "@qorechain/qoreseal/network";
-import { sha3_256 } from "@noble/hashes/sha3.js";
 import type { Identity } from "../core/identity.ts";
 import type { Reader } from "../core/vault.ts";
 
@@ -153,11 +152,6 @@ export type GrantOp = "create" | "share" | "revoke";
 export interface Grant { op: GrantOp; fileId: string; epoch: bigint; version: bigint; added: string[]; removed: string[] }
 export interface GrantRecord extends Grant { hash: string; height: number; time: string; owner: string }
 
-const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
-/** Short public id of a file: who owns it and what it is called. */
-export function fileId(owner: string, name: string): string {
-  return hex(sha3_256(new TextEncoder().encode(`${owner}\n${name}`))).slice(0, 12);
-}
 
 export function grantMemos(g: Grant): string[] {
   const head = `${MEMO_PREFIX} ${g.op} ${g.fileId} e${g.epoch} v${g.version}`;

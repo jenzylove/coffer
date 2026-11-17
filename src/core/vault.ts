@@ -30,6 +30,8 @@ export interface Reader {
 
 export interface CofferFile {
   v: number;
+  /** Random id chosen when the file is created; grant records on chain refer to it. */
+  id: string;
   chainId: string;
   name: string;
   owner: string;
@@ -67,15 +69,19 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 
-function context(f: Pick<CofferFile, "chainId" | "owner" | "name">) {
-  // QoreSeal purposes/contexts are restricted to a safe charset; hash the file name in.
-  return `coffer:${f.chainId}:${f.owner}:${hex(sha3_256(enc.encode(f.name))).slice(0, 32)}`;
+function context(f: Pick<CofferFile, "chainId" | "owner" | "id">) {
+  return `coffer:${f.chainId}:${f.owner}:${f.id}`;
+}
+
+/** A fresh 12 hex character file id. */
+export function newFileId(): string {
+  return hex(crypto.getRandomValues(new Uint8Array(6)));
 }
 
 /** The exact bytes the owner signs. Readers are sorted so order does not matter. */
-export function accessBytes(f: Pick<CofferFile, "v" | "chainId" | "name" | "owner" | "epoch" | "readers" | "key" | "admin">): Uint8Array {
+export function accessBytes(f: Pick<CofferFile, "v" | "id" | "chainId" | "name" | "owner" | "epoch" | "readers" | "key" | "admin">): Uint8Array {
   return enc.encode([
-    "coffer-access", String(f.v), f.chainId, f.name, f.owner, f.epoch.toString(),
+    "coffer-access", String(f.v), f.id, f.chainId, f.name, f.owner, f.epoch.toString(),
     [...f.readers].sort().join(","), hex(sha3_256(f.key)), hex(sha3_256(f.admin)),
   ].join("\n"));
 }
@@ -83,7 +89,7 @@ export function accessBytes(f: Pick<CofferFile, "v" | "chainId" | "name" | "owne
 /** The exact bytes the writer signs. Binds the data to the access block it was written under. */
 export function writeBytes(f: Omit<CofferFile, "write">): Uint8Array {
   return enc.encode([
-    "coffer-write", String(f.v), f.chainId, f.name, f.owner, f.epoch.toString(),
+    "coffer-write", String(f.v), f.id, f.chainId, f.name, f.owner, f.epoch.toString(),
     f.version.toString(), f.writer, hex(sha3_256(f.data)), hex(sha3_256(accessBytes(f))),
   ].join("\n"));
 }
@@ -117,7 +123,7 @@ function openAdmin(f: CofferFile, ownerSeal: SealKeyPair): { mgr: EpochKeyManage
 }
 
 function build(
-  base: { chainId: string; name: string; owner: string },
+  base: { id: string; chainId: string; name: string; owner: string },
   mgr: EpochKeyManager, members: Record<string, Uint8Array>, envelope: Uint8Array,
   owner: Signer, writer: Signer, version: bigint, plaintext: Uint8Array,
 ): CofferFile {
@@ -144,7 +150,7 @@ export function createCoffer(args: {
     members: Object.fromEntries(Object.entries(members).map(([a, k]) => [a, { mlkemPublicKey: k }])),
   });
   const envelope = mgr.distribution();
-  return build({ chainId: args.chainId, name: args.name, owner: args.owner.address }, mgr, members, envelope, args.owner, args.owner, 1n, args.plaintext);
+  return build({ id: newFileId(), chainId: args.chainId, name: args.name, owner: args.owner.address }, mgr, members, envelope, args.owner, args.owner, 1n, args.plaintext);
 }
 
 /** The epoch key this reader holds for the file's current epoch. */
@@ -242,7 +248,7 @@ const sigParse = (t: string): MessageSignature => JSON.parse(dec.decode(fromBase
 export function formatCoffer(f: CofferFile): string {
   const lines = [
     ...HEADER, "",
-    `coffer: ${f.v}`, `chain: ${f.chainId}`, `name: ${f.name}`, `owner: ${f.owner}`,
+    `coffer: ${f.v}`, `id: ${f.id}`, `chain: ${f.chainId}`, `name: ${f.name}`, `owner: ${f.owner}`,
     `epoch: ${f.epoch}`, `readers: ${f.readers.join(" ")}`,
     `key: ${toBase64Url(f.key)}`, `admin: ${toBase64Url(f.admin)}`, `access: ${sigText(f.access)}`,
     `version: ${f.version}`, `writer: ${f.writer}`,
@@ -266,10 +272,11 @@ export function parseCoffer(text: string): CofferFile {
     return v;
   };
   const v = Number(need("coffer"));
+  if (!/^[0-9a-f]{12}$/.test(need("id"))) throw new CofferError("BAD_FORMAT", "bad file id");
   if (v !== FORMAT_VERSION) throw new CofferError("BAD_FORMAT", `unsupported Coffer format ${v}`);
   try {
     return {
-      v, chainId: need("chain"), name: need("name"), owner: need("owner"), epoch: BigInt(need("epoch")),
+      v, id: need("id"), chainId: need("chain"), name: need("name"), owner: need("owner"), epoch: BigInt(need("epoch")),
       readers: need("readers").split(/\s+/).filter(Boolean),
       key: fromBase64Url(need("key")), admin: fromBase64Url(need("admin")), access: sigParse(need("access")),
       version: BigInt(need("version")), writer: need("writer"),

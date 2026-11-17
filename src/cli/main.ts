@@ -13,7 +13,7 @@ import { parseDotenv, serializeDotenv, toRecord, type DotenvEntry } from "../cor
 import { importDotenvx, scanDotenvx } from "../core/dotenvx.ts";
 import {
   TESTNET, accountStatus, fetchReader, fetchPqKeys, registerIdentity, recordGrant, grantHistory,
-  fileId, ChainError, type Network, type TxResult,
+  ChainError, type Network, type TxResult,
 } from "../chain/qore.ts";
 
 const net: Network = { ...TESTNET, rest: process.env.COFFER_REST ?? TESTNET.rest };
@@ -98,7 +98,7 @@ function seen(): Seen {
 }
 function remember(f: CofferFile) {
   const s = seen();
-  s[fileId(f.owner, f.name)] = { epoch: f.epoch.toString(), version: f.version.toString() };
+  s[f.id] = { epoch: f.epoch.toString(), version: f.version.toString() };
   mkdirSync(HOME, { recursive: true });
   writeFileSync(SEEN_FILE, JSON.stringify(s, null, 2));
 }
@@ -111,10 +111,10 @@ async function checkFile(f: CofferFile, opts: { offline?: boolean } = {}) {
   }
   const keys = await fetchPqKeys(net, [f.owner, f.writer]);
   verifyCoffer(f, keys);
-  const hist = await grantHistory(net, f.owner, fileId(f.owner, f.name));
+  const hist = await grantHistory(net, f.owner, f.id);
   const top = hist.reduce((m, g) => (g.epoch > m ? g.epoch : m), 0n);
   if (f.epoch < top) throw new CofferError("ROLLBACK", `this file is epoch ${f.epoch} but its owner announced epoch ${top} on chain: it is an old copy (someone may have restored a version a removed reader can still open)`);
-  const s = seen()[fileId(f.owner, f.name)];
+  const s = seen()[f.id];
   if (s && (f.epoch < BigInt(s.epoch) || (f.epoch === BigInt(s.epoch) && f.version < BigInt(s.version)))) {
     throw new CofferError("ROLLBACK", `this machine already saw epoch ${s.epoch} version ${s.version} of this file; this copy is older (epoch ${f.epoch} version ${f.version})`);
   }
@@ -189,7 +189,7 @@ async function lock(pos: string[], flags: Record<string, string | true>) {
     const f = createCoffer({ chainId: net.chainId, name: plainName(sealedPath), owner: id, ownerMlkem: id.sealKeys.mlkemPublicKey, readers, plaintext: enc.encode(serializeDotenv(entries)) });
     writeSealed(sealedPath, f);
     say(`${c.green("sealed")} ${entries.length} values into ${sealedPath}`);
-    const txs = await recordGrant(net, id, { op: "create", fileId: fileId(f.owner, f.name), epoch: f.epoch, version: f.version, added: readers.map((r) => r.address), removed: [] });
+    const txs = await recordGrant(net, id, { op: "create", fileId: f.id, epoch: f.epoch, version: f.version, added: readers.map((r) => r.address), removed: [] });
     txs.forEach((t) => txLine("recorded on chain", t));
   }
   say(c.dim(`  commit ${sealedPath}. You can delete ${plain} once your team has it; "coffer run" never needs it.`));
@@ -230,7 +230,7 @@ async function share(pos: string[], flags: Record<string, string | true>) {
   const g = shareCoffer(f, id, id.sealKeys, readers);
   writeSealed(path, g);
   say(`${c.green("shared")} ${path} with ${readers.length} reader(s); epoch ${g.epoch}`);
-  const txs = await recordGrant(net, id, { op: "share", fileId: fileId(g.owner, g.name), epoch: g.epoch, version: g.version, added: readers.map((r) => r.address), removed: [] });
+  const txs = await recordGrant(net, id, { op: "share", fileId: g.id, epoch: g.epoch, version: g.version, added: readers.map((r) => r.address), removed: [] });
   txs.forEach((t) => txLine("recorded on chain", t));
   say(c.dim(`  commit ${path} so they get it.`));
 }
@@ -244,7 +244,7 @@ async function revoke(pos: string[], flags: Record<string, string | true>) {
   const { file, rotate } = revokeCoffer(f, id, id.sealKeys, pos, (p) => parseDotenv(dec.decode(p)).map((e) => e.key));
   writeSealed(path, file);
   say(`${c.green("revoked")} ${pos.length} reader(s); epoch ${file.epoch}. They cannot open this or any later version.`);
-  const txs = await recordGrant(net, id, { op: "revoke", fileId: fileId(file.owner, file.name), epoch: file.epoch, version: file.version, added: [], removed: pos });
+  const txs = await recordGrant(net, id, { op: "revoke", fileId: file.id, epoch: file.epoch, version: file.version, added: [], removed: pos });
   txs.forEach((t) => txLine("recorded on chain", t));
   say();
   say(c.bold("They may still have the values they already read. Rotate these at the provider:"));
@@ -269,7 +269,7 @@ async function importCmd(pos: string[], flags: Record<string, string | true>) {
   const f = createCoffer({ chainId: net.chainId, name: plainName(sealedPath), owner: id, ownerMlkem: id.sealKeys.mlkemPublicKey, readers, plaintext: enc.encode(serializeDotenv(imp.entries)) });
   writeSealed(sealedPath, f);
   say(`${c.green("moved")} ${imp.entries.length} values from dotenvx (secp256k1) to ${sealedPath} (ML-KEM-1024)`);
-  const txs = await recordGrant(net, id, { op: "create", fileId: fileId(f.owner, f.name), epoch: f.epoch, version: f.version, added: readers.map((r) => r.address), removed: [] });
+  const txs = await recordGrant(net, id, { op: "create", fileId: f.id, epoch: f.epoch, version: f.version, added: readers.map((r) => r.address), removed: [] });
   txs.forEach((t) => txLine("recorded on chain", t));
   say(c.dim(`  the dotenvx copy in your git history stays readable to anyone with ${keysPath}, and to a quantum computer later. Rotate these values when you can.`));
 }
@@ -308,7 +308,7 @@ async function keys(flags: Record<string, string | true>) {
 async function status(flags: Record<string, string | true>) {
   const path = resolveSealed(flags);
   const f = readSealed(path);
-  say(`${c.bold(path)}  ${c.dim(`file ${fileId(f.owner, f.name)} · ${f.chainId}`)}`);
+  say(`${c.bold(path)}  ${c.dim(`file ${f.id} · ${f.chainId}`)}`);
   say(`  owner    ${f.owner}`);
   say(`  epoch    ${f.epoch}   version ${f.version}   last written by ${f.writer === f.owner ? "owner" : f.writer}`);
   say(`  readers  ${f.readers.length}`);
@@ -319,7 +319,7 @@ async function status(flags: Record<string, string | true>) {
   } catch (e) {
     say(`  ${c.red("CHECK FAILED")}: ${(e as Error).message}`);
   }
-  const hist = await grantHistory(net, f.owner, fileId(f.owner, f.name));
+  const hist = await grantHistory(net, f.owner, f.id);
   say(`  history on chain (${hist.length})`);
   for (const h of hist) {
     const who = [...h.added.map((a) => `+${a}`), ...h.removed.map((a) => `-${a}`)].join(" ");
@@ -365,5 +365,6 @@ async function main() {
 
 main().catch((e) => {
   console.error(c.red(`coffer: ${e instanceof Error ? e.message : String(e)}`));
-  process.exit(1);
+  // exitCode, not exit(): exiting while fetch sockets close crashes libuv on Windows
+  process.exitCode = 1;
 });
