@@ -100,7 +100,14 @@ export async function sendTx(net: Network, id: Identity, msgs: { typeUrl: string
     classicalKey: id.classicalKey,
     pqKey: mode === "classicalOnly" ? undefined : id.pqKey,
   }).txBytes;
-  const sim = await simulateTx({ rest: net.rest, txBytes: sign(600_000n) });
+  // 400k gas caps the fee the simulation reserves (40,000 uqor); the largest Coffer tx uses about 290k.
+  let sim;
+  try {
+    sim = await simulateTx({ rest: net.rest, txBytes: sign(400_000n) });
+  } catch (e) {
+    if (/insufficient funds|smaller than/i.test((e as Error).message)) throw new ChainError("NO_FUNDS", `${id.address} is out of test QOR. Run "coffer init" for a top up, or use the faucet.`);
+    throw e;
+  }
   const gas = sim.suggestedGasLimit;
   const res = await submitWithSignBytesFallback({ rest: net.rest, chainId: net.chainId, sign: () => sign(gas) });
   if (res.code !== 0) throw new ChainError("TX_REFUSED", `refused: ${describeKemRegistryError(res.codespace, res.code) ?? res.log}`);
@@ -144,6 +151,9 @@ export async function registerIdentity(net: Network, id: Identity, onStep?: (s: 
 // ---- grant records ---------------------------------------------------------
 // Every share and revoke is a hybrid-signed 1 uqor self-send whose memo says
 // what changed. Anyone can list them; the owner's signature is the chain's.
+
+/** Below this an account cannot pay for one more transaction. */
+export const MIN_UQOR = 40_000n;
 
 export const MEMO_PREFIX = "coffer/1";
 const MAX_MEMO = 256;

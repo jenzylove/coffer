@@ -12,7 +12,7 @@ import {
 import { parseDotenv, serializeDotenv, toRecord, type DotenvEntry } from "../core/dotenv.ts";
 import { importDotenvx, scanDotenvx } from "../core/dotenvx.ts";
 import {
-  TESTNET, accountStatus, fetchReader, fetchPqKeys, registerIdentity, recordGrant, grantHistory,
+  TESTNET, accountStatus, fetchReader, fetchPqKeys, registerIdentity, MIN_UQOR, recordGrant, grantHistory,
   ChainError, type Network, type TxResult,
 } from "../chain/qore.ts";
 
@@ -142,16 +142,17 @@ async function init() {
     say(c.dim(`  saved to ${ID_FILE}. This file opens every Coffer file shared with you: back it up and never commit it.`));
   }
   let st = await accountStatus(net, id.address, id.sealKeys.mlkemPublicKey);
-  if (st.mldsa && st.kemIsOurs) { say(c.green("ready: anyone can seal files to this address")); return; }
-  if (st.uqor < 60_000n) {
-    say(`funding the two setup transactions from the Coffer relayer...`);
+  const ready = st.mldsa && st.kemIsOurs;
+  if (ready && st.uqor >= MIN_UQOR) { say(c.green("ready: anyone can seal files to this address")); return; }
+  if (st.uqor < (ready ? MIN_UQOR : 60_000n)) {
+    say(ready ? `topping up from the Coffer relayer...` : `funding the two setup transactions from the Coffer relayer...`);
     const r = await fetch(RELAYER, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address: id.address }) }).catch(() => null);
     const body = r ? await r.json().catch(() => ({})) as any : {};
     if (!r?.ok) {
       throw new ChainError("NO_FUNDS", `the relayer could not fund ${id.address}${body.error ? `: ${body.error}` : ""}. Send 0.1 test QOR to it (faucet: https://dashboard.qorechain.io/faucet) and run "coffer init" again.`);
     }
     if (body.hash) txLine("funded", { hash: body.hash } as TxResult);
-    for (let i = 0; i < 30 && st.uqor < 60_000n; i++) {
+    for (let i = 0; i < 30 && st.uqor < (ready ? MIN_UQOR : 60_000n); i++) {
       await new Promise((ok) => setTimeout(ok, 2000));
       st = await accountStatus(net, id.address, id.sealKeys.mlkemPublicKey);
     }
