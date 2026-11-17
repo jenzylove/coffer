@@ -1,0 +1,1 @@
+{ "extends": "./tsconfig.json", "compilerOptions": { "noEmit": false, "allowImportingTsExtensions": true, "declaration": true }, "exclude": ["src/**/*.test.ts"] }

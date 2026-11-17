@@ -1,0 +1,17 @@
+# secrets: never commit plain env files or seal seeds
+.env
+.env.*
+!.env.coffer
+!.env.*.coffer
+!.env.example
+.env.keys
+*.seed
+.coffer/
+
+# build and deps
+node_modules/
+dist/
+web/dist/
+coverage/
+*.log
+.DS_Store

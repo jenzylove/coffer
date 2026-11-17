@@ -1,0 +1,37 @@
+{
+  "name": "@jenzylove/coffer",
+  "version": "0.1.0",
+  "description": "Push your secrets to GitHub. Only your team can open them. .env files sealed with ML-KEM-1024 to QoreChain addresses.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "coffer": "dist/cli/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "test": "node --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@cosmjs/amino": "^0.39.0",
+    "@cosmjs/proto-signing": "^0.39.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@qorechain/qoreseal": "^0.1.0",
+    "@qorechain/qoresign": "^0.2.0",
+    "@scure/bip39": "^2.4.0",
+    "cosmjs-types": "^0.11.0",
+    "eciesjs": "0.5.0"
+  },
+  "devDependencies": {
+    "@dotenvx/dotenvx": "^2.38.2",
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
+  }
+}
