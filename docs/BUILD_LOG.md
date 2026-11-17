@@ -18,3 +18,13 @@
 | Plain text on disk after all steps | none outside the original `.env` | |
 
 Fixed on the way: file ids are now random and signed (an id derived from owner and name made a recreated file look like a rollback forever).
+
+## 17 to 18 Nov 2026
+
+**Live at https://coffer.jdollar.site.** The full judge path (scan, address setup paid by the relayer, seal, share with the demo teammate, open, revoke, refused, rollback refused, open and verify a file, tampered copy refused) runs in about 80 seconds against testnet.
+
+**Independent audit, fixes proven on testnet.**
+- Someone with write access to a repo could replace `.env.coffer` with their own valid file sealed to you. The CLI now remembers each file's owner per path and refuses a copy from a different owner; the testnet run shows a revoked teammate's swapped file refused for both `run` and `set`.
+- Shares and revokes are recorded on chain before the file is written; a file newer than its record is refused. History reads are paginated.
+- `coffer set KEY` asks for the value so it stays out of shell history.
+- Relayer: client address taken from the proxy hop, requests reserved before any lookup, proxy limited to GET and POST.
