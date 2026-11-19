@@ -46,7 +46,13 @@ export default function AppPage() {
             <button role="tab" aria-selected={mode === "open"} onClick={() => pick("open")}>Open a file</button>
           </div>
         </div>
-        {mode === "flow" ? <Flow /> : <OpenFile />}
+        <div className="app-grid">
+          {mode === "flow" ? <Flow /> : <OpenFile />}
+          <aside className="app-aside" aria-label="What this browser keeps">
+            <div className="mini-seal" aria-hidden />
+            <p>Sealing and opening happen in this browser. It keeps your recovery phrase and sealed files, never a plain value.</p>
+          </aside>
+        </div>
       </div>
     </Page>
   );

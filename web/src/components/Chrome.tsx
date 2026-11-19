@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, usePath } from "../lib/router.tsx";
 import { useIdentity, isReady } from "../lib/identity.tsx";
 import { short } from "../lib/net.ts";
-import { Mark, Wordmark } from "./Logo.tsx";
+import { Wordmark } from "./Logo.tsx";
 
 type Theme = "light" | "dark";
 function initialTheme(): Theme {
@@ -64,7 +64,7 @@ export function TopBar() {
     <header className="topbar">
       <div className="topbar-in">
         <Link to="/" className="brand" aria-label="Coffer home"><Wordmark /></Link>
-        <nav className="topnav" aria-label="Main">
+        <nav className="navpill" aria-label="Main">
           <Link to="/#how" className="hide-sm">How it works</Link>
           <Link to="/proof" aria-current={path === "/proof" ? "page" : undefined}>Proof</Link>
           <Link to="/app" aria-current={path === "/app" ? "page" : undefined}>App</Link>
@@ -83,34 +83,23 @@ export function Footer() {
     <footer className="footer">
       <div className="wrap footer-in">
         <div className="footer-brand">
-          <Mark size={44} />
-          <p className="footer-word">Coffer</p>
-          <p className="muted">Push your secrets to GitHub. Only your team can open them.</p>
+          <Wordmark />
+          <p className="muted small">Your .env, sealed to your team. Testnet only for now.</p>
         </div>
-        <div className="footer-cols">
-          <div>
-            <p className="label">Product</p>
-            <Link to="/app">App</Link>
-            <Link to="/app#open">Open a file</Link>
-            <Link to="/#scan">Scan a repo</Link>
-          </div>
-          <div>
-            <p className="label">Evidence</p>
-            <Link to="/proof">Proof</Link>
-            <Link to="/#safety">Safety and limits</Link>
-            <Link to="/#faq">Questions</Link>
-          </div>
-          <div>
-            <p className="label">Code</p>
-            <a href="https://github.com/jenzylove/coffer" target="_blank" rel="noreferrer">GitHub repo</a>
-            <a href="https://github.com/jenzylove/coffer#the-cli" target="_blank" rel="noreferrer">Install the CLI</a>
-            <a href="https://qorechain.io" target="_blank" rel="noreferrer">QoreChain</a>
-          </div>
-        </div>
+        <nav className="footer-links" aria-label="Footer">
+          <Link to="/app">App</Link>
+          <Link to="/app#open">Open a file</Link>
+          <Link to="/#scan">Scan a repo</Link>
+          <Link to="/proof">Proof</Link>
+          <Link to="/#safety">Safety</Link>
+          <Link to="/#faq">Questions</Link>
+          <a href="https://github.com/jenzylove/coffer" target="_blank" rel="noreferrer">GitHub repo</a>
+          <a href="https://github.com/jenzylove/coffer#the-cli" target="_blank" rel="noreferrer">Install the CLI</a>
+        </nav>
       </div>
       <div className="wrap">
         <div className="footer-base">
-          <span>Testnet only for now. Built for Build Before Q Day, the QoreChain developer fest.</span>
+          <span>Built for Build Before Q Day, the QoreChain developer fest.</span>
           <span>Apache 2.0</span>
         </div>
       </div>
@@ -126,7 +115,8 @@ export function Reveal({ children, as: As = "div", className = "", delay = 0, id
     const el = ref.current;
     if (!el) return;
     if (!("IntersectionObserver" in window)) { setShown(true); return; }
-    const io = new IntersectionObserver(([e]) => { if (e?.isIntersecting) { setShown(true); io.disconnect(); } }, { rootMargin: "0px 0px -12% 0px" });
+    // also reveal anything already scrolled past, so a fast scroll on a busy page never skips a block
+    const io = new IntersectionObserver(([e]) => { if (e && (e.isIntersecting || e.boundingClientRect.top < 0)) { setShown(true); io.disconnect(); } }, { rootMargin: "0px 0px -12% 0px" });
     io.observe(el);
     return () => io.disconnect();
   }, []);

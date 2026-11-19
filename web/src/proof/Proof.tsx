@@ -56,12 +56,13 @@ export default function Proof() {
           <p className="lede">Every number here is either read live from the Coffer server and QoreChain, or recorded from a run on QoreChain testnet with a transaction you can open. Each one says which.</p>
         </header>
 
+        <div className="proof-body">
         <Reveal as="section" className="psect">
-          <h2 className="psect-t"><span className="mono shead-n">01</span>The exposure</h2>
+          <h2 className="psect-t"><span className="shead-n">01</span>The exposure</h2>
           <p className="badge">Recorded on 17 November 2026</p>
           <div className="pnums">
-            <div><p className="count-n display">2,284</p><p>public files on GitHub contain <code>DOTENV_PUBLIC_KEY</code>, the mark of a dotenvx encrypted file.</p></div>
-            <div><p className="count-n display t-seal">1,716</p><p>of those also contain <code>encrypted:</code> values, locked with secp256k1.</p></div>
+            <div><p className="count-n">2,284</p><p>public files on GitHub contain <code>DOTENV_PUBLIC_KEY</code>, the mark of a dotenvx encrypted file.</p></div>
+            <div><p className="count-n">1,716</p><p>of those also contain <code>encrypted:</code> values, locked with secp256k1.</p></div>
           </div>
           <details className="method" open>
             <summary>Method</summary>
@@ -70,7 +71,7 @@ export default function Proof() {
         </Reveal>
 
         <Reveal as="section" className="psect">
-          <h2 className="psect-t"><span className="mono shead-n">02</span>A three person team on testnet</h2>
+          <h2 className="psect-t"><span className="shead-n">02</span>A three person team on testnet</h2>
           <p className="badge">Recorded on 17 November 2026, through the real CLI</p>
           <ol className="prun">
             {RUN.map((r) => (
@@ -96,7 +97,7 @@ export default function Proof() {
         </Reveal>
 
         <Reveal as="section" className="psect">
-          <h2 className="psect-t"><span className="mono shead-n">03</span>Sizes and costs</h2>
+          <h2 className="psect-t"><span className="shead-n">03</span>Sizes and costs</h2>
           <p className="badge">Measured in the spike, 17 November 2026</p>
           <dl className="facts facts-big">
             <div><dt>Setup per reader, once</dt><dd className="mono">0.054 QOR</dd></div>
@@ -108,10 +109,11 @@ export default function Proof() {
         </Reveal>
 
         <Reveal as="section" className="psect">
-          <h2 className="psect-t"><span className="mono shead-n">04</span>The Coffer server, right now</h2>
+          <h2 className="psect-t"><span className="shead-n">04</span>The Coffer server, right now</h2>
           <Live />
           <p className="muted">The server pays setup fees for new addresses and runs the demo teammate. It never receives your values: sealing and opening happen in your browser or terminal. Files shared with the demo teammate are opened by that teammate on the server, which reports names only.</p>
         </Reveal>
+        </div>
       </div>
     </Page>
   );

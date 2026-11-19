@@ -63,21 +63,21 @@ export function LocalDemo() {
     const entries = d.parseDotenv(env);
     if (!entries.length) throw new Error("Write at least one line like NAME=value first.");
     const f = v.createCoffer({ chainId: "qorechain-diana", name: ".env", owner: ids.you, ownerMlkem: ids.you.sealKeys.mlkemPublicKey, plaintext: new TextEncoder().encode(d.serializeDotenv(entries)) });
-    setSt({ ...EMPTY, file: f, text: v.formatCoffer(f), can: tryOpen(v, f, ids), note: `${entries.length} values sealed. Only you can open it so far.` });
+    setSt({ ...EMPTY, file: f, text: v.formatCoffer(f), can: tryOpen(v, f, ids), note: `${entries.length} values sealed. Only you can open it.` });
     setStep(1);
   });
 
   const share = () => act("share", async () => {
     const { v, ids } = await ready();
     const f = v.shareCoffer(st.file!, ids.you, ids.you.sealKeys, [ids.one, ids.two].map((i) => ({ address: i.address, mlkemPublicKey: i.sealKeys.mlkemPublicKey })));
-    setSt({ ...st, file: f, text: v.formatCoffer(f), can: tryOpen(v, f, ids), note: "Shared with two teammates by their addresses. Each gets the key sealed to their own ML-KEM key." });
+    setSt({ ...st, file: f, text: v.formatCoffer(f), can: tryOpen(v, f, ids), note: "Shared with two teammates by address." });
     setStep(2);
   });
 
   const revoke = () => act("revoke", async () => {
     const { v, d, ids } = await ready();
     const { file, rotate } = v.revokeCoffer(st.file!, ids.you, ids.you.sealKeys, [ids.two.address], (p) => d.parseDotenv(new TextDecoder().decode(p)).map((e) => e.key));
-    setSt({ ...st, file, text: v.formatCoffer(file), can: tryOpen(v, file, ids), rotate, note: "Teammate two removed. The file is sealed again under a new key they never received." });
+    setSt({ ...st, file, text: v.formatCoffer(file), can: tryOpen(v, file, ids), rotate, note: "Teammate two removed. New key, sealed to the others." });
     setStep(3);
   });
 
@@ -90,17 +90,17 @@ export function LocalDemo() {
     const forged = { ...st.file!, readers: [...st.file!.readers, ids.two.address] };
     let tamper = "accepted";
     try { v.verifyCoffer(forged, pq); } catch (e) { tamper = (e as Error).message.split(":")[0] ?? "refused"; }
-    setSt({ ...st, names, tamper, note: "Teammate one opened it after checking both signatures. Their program gets these names as environment variables." });
+    setSt({ ...st, names, tamper, note: "Teammate one checked both signatures and opened it." });
     setStep(4);
   });
 
   const reset = () => { setSt(EMPTY); setStep(0); setErr(null); };
 
   const rows: { n: string; title: string; body: string; btn: string; on: () => void; key: string }[] = [
-    { n: "1", key: "seal", title: "Seal", body: "Your .env becomes .env.coffer: the values are encrypted under a fresh key, and that key is sealed with ML-KEM-1024 to each reader. The file is safe to commit.", btn: "Seal this file", on: seal },
-    { n: "2", key: "share", title: "Share by address", body: "Type a teammate's address. Coffer reads their public key from QoreChain and seals a new key to them. No key swapping, no invite links.", btn: "Share with two teammates", on: share },
-    { n: "3", key: "revoke", title: "Revoke", body: "Remove someone and the file is sealed again under a key they never get. They can't open this version or any later one. Coffer lists what to rotate, because they may have read the old values.", btn: "Remove teammate two", on: revoke },
-    { n: "4", key: "run", title: "Run", body: "A reader runs their app with the secrets in its environment only. Plain text never touches the disk. Before opening, Coffer checks the owner's and writer's signatures.", btn: "Open as teammate one", on: run },
+    { n: "1", key: "seal", title: "Seal", body: "Your .env becomes .env.coffer, safe to commit.", btn: "Seal this file", on: seal },
+    { n: "2", key: "share", title: "Share by address", body: "Add teammates by address. No key swapping.", btn: "Share with two teammates", on: share },
+    { n: "3", key: "revoke", title: "Revoke", body: "Sealed again under a key they never get.", btn: "Remove teammate two", on: revoke },
+    { n: "4", key: "run", title: "Run", body: "Signatures checked, then opened in memory only.", btn: "Open as teammate one", on: run },
   ];
 
   return (
@@ -128,7 +128,7 @@ export function LocalDemo() {
       </div>
 
       <div className="demo-panel" aria-live="polite">
-        <p className="label">What just happened, computed in your browser</p>
+        <p className="label">Computed in your browser</p>
         <ul className="who">
           {(["you", "one", "two"] as Who[]).map((w) => {
             const c = st.can[w];
@@ -143,7 +143,7 @@ export function LocalDemo() {
         {st.note && <p className="demo-note">{st.note}</p>}
         {st.rotate && <p className="demo-rotate"><span className="label">Rotate at the provider</span><span className="mono">{st.rotate.join("  ")}</span></p>}
         {st.names && <p className="demo-rotate"><span className="label">Opened, names only</span><span className="mono">{st.names.join("  ")}</span></p>}
-        {st.tamper && <p className="demo-note">A copy with the reader list edited by hand to add teammate two back: <strong className="t-seal">{st.tamper === "accepted" ? "accepted" : "refused"}</strong>{st.tamper !== "accepted" ? ", the owner's signature no longer matches." : "."}</p>}
+        {st.tamper && <p className="demo-note">A copy edited by hand to add teammate two back: <strong className="t-seal">{st.tamper === "accepted" ? "accepted" : "refused"}</strong>{st.tamper !== "accepted" ? ", the signature no longer matches." : "."}</p>}
         {st.file && (
           <details className="demo-raw">
             <summary>See the sealed file ({(st.text?.length ?? 0).toLocaleString("en")} characters, epoch {String(st.file.epoch)}, {st.file.readers.length} {st.file.readers.length === 1 ? "reader" : "readers"})</summary>
