@@ -163,8 +163,9 @@ export default function LandingRest() {
     if (n >= SECTIONS.length) return;
     const w = window as any;
     const next = () => startTransition(() => setN((x) => x + 1));
-    const h = w.requestIdleCallback ? w.requestIdleCallback(next, { timeout: 600 }) : setTimeout(next, 80);
-    return () => { w.cancelIdleCallback?.(h); clearTimeout(h); };
+    const idle = !!w.requestIdleCallback;
+    const h = idle ? w.requestIdleCallback(next, { timeout: 600 }) : setTimeout(next, 80);
+    return () => { if (idle) w.cancelIdleCallback(h); else clearTimeout(h); };
   }, [n]);
   return <>{SECTIONS.slice(0, n).map((render, i) => <div key={i}>{render()}</div>)}</>;
 }

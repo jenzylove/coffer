@@ -12,11 +12,13 @@ export function Landing() {
     if (rest) return;
     const go = () => startTransition(() => setRest(true));
     const w = window as any;
-    const h = w.requestIdleCallback ? w.requestIdleCallback(go, { timeout: 2500 }) : setTimeout(go, 1200);
+    // cancel only the kind of handle we made: clearTimeout on an idle id can kill an unrelated timer (it froze the hero)
+    const idle = !!w.requestIdleCallback;
+    const h = idle ? w.requestIdleCallback(go, { timeout: 2500 }) : setTimeout(go, 1200);
     const onScroll = () => go();
     addEventListener("scroll", onScroll, { once: true, passive: true });
     addEventListener("hashchange", go);
-    return () => { w.cancelIdleCallback?.(h); clearTimeout(h); removeEventListener("scroll", onScroll); removeEventListener("hashchange", go); };
+    return () => { if (idle) w.cancelIdleCallback(h); else clearTimeout(h); removeEventListener("scroll", onScroll); removeEventListener("hashchange", go); };
   }, [rest]);
   return (
     <Page>
