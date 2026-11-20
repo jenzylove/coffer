@@ -130,7 +130,7 @@ export function Hero() {
         )}
         <div className="screen-copy">
           <h1 id="hero-title">Your .env, sealed to your team.</h1>
-          <p>Commit it to any repo. Only the addresses you name can open it, even after quantum computers arrive.</p>
+          <p>Commit it to any repo. Only the addresses you name can open it. The lock is built to hold against quantum computers.</p>
         </div>
         <div className={`screen-state state-${phase}`} aria-live="polite">
           <span className="state-dot" aria-hidden />
