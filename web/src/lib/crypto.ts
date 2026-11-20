@@ -28,3 +28,19 @@ export function work<T>(op: string, args: unknown = {}): Promise<T> {
     get().postMessage({ id, op, args });
   });
 }
+
+/** Drop a stuck worker; the next call starts a fresh one. Pending calls fail. */
+export function resetWorker() {
+  worker?.terminate();
+  for (const w of waiting.values()) w.fail(new Error("The sealing code was restarted"));
+  waiting.clear();
+  worker = null;
+}
+
+/** work(), but give up after `ms` and restart the worker so nothing stays stuck. */
+export function workWithin<T>(op: string, args: unknown, ms: number): Promise<T> {
+  return new Promise<T>((ok, fail) => {
+    const t = setTimeout(() => { resetWorker(); fail(Object.assign(new Error("timed out"), { code: "TIMEOUT" })); }, ms);
+    work<T>(op, args).then((v) => { clearTimeout(t); ok(v); }, (e) => { clearTimeout(t); fail(e); });
+  });
+}

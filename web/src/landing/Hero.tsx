@@ -5,7 +5,7 @@
 // back to CSS if it can't hold 40 fps.
 import { useEffect, useRef, useState } from "react";
 import type { Glass } from "./glass.ts";
-import { work } from "../lib/crypto.ts";
+import { work, workWithin } from "../lib/crypto.ts";
 
 const PLAIN = [
   "OPENAI_API_KEY=sk-proj-••••••••",
@@ -80,29 +80,40 @@ export function Hero() {
   useEffect(() => {
     let stop = false;
     const stretch = new URLSearchParams(location.search).has("slow") ? 4 : 1;
-    const ready = async () => { while (!stop && (!visible.current || document.hidden)) await new Promise((ok) => setTimeout(ok, 400)); };
+    // measure the real position each time: a stale observer flag must never freeze the loop
+    const onScreen = () => { const b = section.current?.getBoundingClientRect(); return !!b && b.bottom > 0 && b.top < innerHeight; };
+    const ready = async () => { while (!stop && (!onScreen() || document.hidden)) await new Promise((ok) => setTimeout(ok, 400)); };
+    const call = <T,>(op: string, args: unknown = {}) => workWithin<T>(op, args, 6000);
     const wait = async (ms: number) => { await new Promise((ok) => setTimeout(ok, ms * stretch)); await ready(); };
     const show = (p: Phase) => { setPhase(p); setRun((r) => r + 1); };
     (async () => {
+      let restarts = 0;
+      while (!stop && restarts < 5) {
       try {
-        await work("heroInit", { lines: PLAIN });
+        await call("heroInit", { lines: PLAIN });
         while (!stop) {
           show("plain"); setNames([]); glass.current?.plain(PLAIN);
           await wait(HOLD.plain!); if (stop) return;
-          const a = await work<{ cipher: string[] }>("heroSeal", { both: true });
+          const a = await call<{ cipher: string[] }>("heroSeal", { both: true });
           setCipher(a.cipher); show("sealed"); glass.current?.seal(a.cipher);
           await wait(HOLD.sealed!); if (stop) return;
-          const b = await work<{ cipher: string[] }>("heroSeal", { both: false });
+          const b = await call<{ cipher: string[] }>("heroSeal", { both: false });
           setCipher(b.cipher); show("revoked"); glass.current?.seal(b.cipher);
           await wait(HOLD.revoked!); if (stop) return;
-          const n = await work<string[]>("heroOpen");
+          const n = await call<string[]>("heroOpen");
           setNames(n); show("opened"); glass.current?.open(n);
           await wait(HOLD.opened!); if (stop) return;
-          if ((await work<string>("heroRefuse")) !== "refused") { show("failed"); return; } // never fake a refusal
+          if ((await call<string>("heroRefuse")) !== "refused") { show("failed"); return; } // never fake a refusal
           setNames([]); show("refused"); glass.current?.refuse();
           await wait(HOLD.refused!);
         }
-      } catch { if (!stop) show("failed"); }
+      } catch (e) {
+        // a stuck worker was restarted: begin a fresh real loop instead of freezing
+        if ((e as { code?: string })?.code === "TIMEOUT" || /restarted/.test(String((e as Error)?.message))) { restarts++; continue; }
+        if (!stop) show("failed");
+        return;
+      }
+      }
     })();
     return () => { stop = true; };
   }, []);
