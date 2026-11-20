@@ -1,12 +1,19 @@
 // A tiny history router: three routes do not need a library.
 import { useEffect, useState, type AnchorHTMLAttributes, type MouseEvent } from "react";
 
+/** Scroll to an id, waiting briefly for sections that load late. */
+export function scrollToId(id: string, tries = 40) {
+  const el = document.getElementById(id);
+  if (el) { el.scrollIntoView({ behavior: "smooth" }); return; }
+  if (tries > 0) setTimeout(() => scrollToId(id, tries - 1), 80);
+}
+
 export function navigate(to: string) {
   if (to === location.pathname + location.hash) return;
   history.pushState(null, "", to);
   window.dispatchEvent(new PopStateEvent("popstate"));
   const hash = to.split("#")[1];
-  if (hash) setTimeout(() => document.getElementById(hash)?.scrollIntoView({ behavior: "smooth" }), 60);
+  if (hash) scrollToId(hash);
   else window.scrollTo(0, 0);
 }
 
@@ -30,7 +37,7 @@ export function Link({ to, onClick, ...rest }: AnchorHTMLAttributes<HTMLAnchorEl
         if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
         const [p, h] = to.split("#");
         if (p === "" || p === location.pathname) {
-          if (h) { e.preventDefault(); history.replaceState(null, "", to); document.getElementById(h)?.scrollIntoView({ behavior: "smooth" }); }
+          if (h) { e.preventDefault(); history.replaceState(null, "", to); window.dispatchEvent(new HashChangeEvent("hashchange")); scrollToId(h); }
           return;
         }
         e.preventDefault();

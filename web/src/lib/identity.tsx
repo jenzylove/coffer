@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import type { Identity } from "../../../src/core/identity.ts";
 import type { AccountStatus } from "../../../src/chain/qore.ts";
 import { net, errText } from "./net.ts";
+import { work } from "./crypto.ts";
 
 const KEY = "coffer.identity";
 
@@ -46,11 +47,9 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     if (!phrase) return;
     setDeriving(true);
     (async () => {
-      const { identityFromMnemonic } = await import("../../../src/core/identity.ts");
-      // let the browser paint before the key derivation
-      await new Promise((ok) => setTimeout(ok, 30));
       try {
-        const next = identityFromMnemonic(phrase);
+        // derived in the worker: the page stays responsive
+        const next = await work<Identity>("identity", { phrase });
         if (live) setId(next);
       } catch {
         if (live) { writePhrase(null); setPhrase(null); }
@@ -81,17 +80,15 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
   useEffect(() => { if (id) void refresh(); }, [id, refresh]);
 
   const create = useCallback(async () => {
-    const { newMnemonic } = await import("../../../src/core/identity.ts");
-    const m = newMnemonic();
+    const m = await work<string>("newPhrase");
     writePhrase(m);
     setPhrase(m);
     return m;
   }, []);
 
   const restore = useCallback(async (p: string) => {
-    const { identityFromMnemonic } = await import("../../../src/core/identity.ts");
     const clean = p.trim().toLowerCase().split(/\s+/).join(" ");
-    identityFromMnemonic(clean); // throws on a bad phrase
+    await work("identity", { phrase: clean }); // throws on a bad phrase
     writePhrase(clean);
     setPhrase(clean);
   }, []);

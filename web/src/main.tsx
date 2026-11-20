@@ -1,8 +1,11 @@
-import { StrictMode, Suspense, lazy, useEffect } from "react";
+import { StrictMode, Suspense, lazy, startTransition, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { IdentityProvider } from "./lib/identity.tsx";
 import { usePath } from "./lib/router.tsx";
 import { Landing } from "./landing/Landing.tsx";
+import "@fontsource-variable/onest/index.css";
+import "@fontsource/dm-mono/latin-400.css";
+import "@fontsource/dm-mono/latin-500.css";
 import "./styles.css";
 
 const AppPage = lazy(() => import("./app/AppPage.tsx"));
@@ -24,10 +27,14 @@ function Root() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <IdentityProvider>
-      <Root />
-    </IdentityProvider>
-  </StrictMode>,
-);
+// a transition lets React split the first render into small slices instead of one long task
+const root = createRoot(document.getElementById("root")!);
+startTransition(() => {
+  root.render(
+    <StrictMode>
+      <IdentityProvider>
+        <Root />
+      </IdentityProvider>
+    </StrictMode>,
+  );
+});

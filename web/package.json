@@ -9,6 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource-variable/onest": "^5.2.5",
+    "@fontsource/dm-mono": "^5.2.5",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "three": "0.180.0"

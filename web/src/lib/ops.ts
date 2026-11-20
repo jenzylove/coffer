@@ -1,6 +1,7 @@
 // The app's chain steps, built only from src/core and src/chain (same as the CLI).
 import type { Identity } from "../../../src/core/identity.ts";
-import { verifyCoffer, CofferError, type CofferFile } from "../../../src/core/vault.ts";
+import { CofferError, formatCoffer, type CofferFile } from "../../../src/core/vault.ts";
+import { work } from "./crypto.ts";
 import { accountStatus, fetchPqKeys, grantHistory, recordGrant, type Grant, type GrantRecord, type TxResult } from "../../../src/chain/qore.ts";
 import { api, net, sleep } from "./net.ts";
 
@@ -65,7 +66,7 @@ export interface CheckResult { history: GrantRecord[]; top: bigint }
 /** The CLI's checkFile: signatures against chain keys, the chain's latest epoch, this browser's high-water mark. */
 export async function checkFile(f: CofferFile): Promise<CheckResult> {
   const keys = await fetchPqKeys(net, [f.owner, f.writer]);
-  verifyCoffer(f, keys);
+  await work("verify", { text: formatCoffer(f), pqKeys: keys });
   const history = await grantHistory(net, f.owner, f.id);
   const top = history.reduce((m, g) => (g.epoch > m ? g.epoch : m), 0n);
   if (f.epoch < top) throw new CofferError("ROLLBACK", `this file is epoch ${f.epoch} but its owner announced epoch ${top} on chain: it is an old copy (someone may have restored a version a removed reader can still open)`);
@@ -80,15 +81,19 @@ export async function checkFile(f: CofferFile): Promise<CheckResult> {
 /** Plain words for the error codes a person can hit. */
 export function explain(code: string | undefined, message: string): string {
   switch (code) {
-    case "NOT_A_READER": return "Not a reader: this address can't open this version of the file.";
-    case "BAD_SIGNATURE": return "The signatures don't match: someone changed this file by hand.";
-    case "ROLLBACK": return "This is an old copy. The owner has published a newer version on chain.";
-    case "UNRECORDED": return "The chain has no record of this version. Coffer records every change before it counts, so this copy was not made by Coffer, or its owner still needs to record it.";
-    case "UNKNOWN_KEY": return "The signer has no signing key on QoreChain, so the file can't be checked.";
-    case "WRITER_NOT_READER": return "The last writer is not a reader of this file.";
-    case "BAD_FORMAT": return `This is not a Coffer file (${message}).`;
-    case "NO_KEM_KEY": return "This address hasn't set up Coffer yet. Ask them to open the Coffer app or run coffer init, then try again.";
-    case "BAD_ADDRESS": return "That is not a qor1 address.";
+    case "NOT_A_READER": return "This address isn't on the list for this file.";
+    case "BAD_SIGNATURE": return "Someone changed this file by hand, so it can't be trusted.";
+    case "ROLLBACK": return "This is an old copy. A newer version exists.";
+    case "UNKNOWN_KEY": return "Whoever signed this file hasn't set up Coffer, so it can't be checked.";
+    case "WRITER_NOT_READER": return "The last person to change this file isn't on its list.";
+    case "BAD_FORMAT": return "This isn't a Coffer file.";
+    case "NO_KEM_KEY": return "That address hasn't set up Coffer yet. Ask them to open the Coffer app first.";
+    case "BAD_ADDRESS": return "That doesn't look like a QoreChain address. It starts with qor1.";
+    case "NOT_OWNER": return "Only the person who sealed this file can change who reads it.";
+    case "TX_REFUSED": case "TX_FAILED": return "QoreChain didn't accept the transaction. Try again in a moment.";
+    case "TX_TIMEOUT": return "QoreChain is slow to confirm. Try again in a minute.";
+    case "REST_ERROR": return "QoreChain can't be reached right now. Try again in a moment.";
+    case "NO_FUNDS": return "Your address has no test QOR yet.";
     default: return message;
   }
 }

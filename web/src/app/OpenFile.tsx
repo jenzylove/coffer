@@ -1,14 +1,22 @@
-// "Open a file": check any .env.coffer against QoreChain, show who can read it and
-// its on chain history, and open it if this address is a reader. Values stay in
-// this component's memory and appear one at a time, only on click.
-import { useEffect, useMemo, useState } from "react";
+// "Open a file": check any .env.coffer against QoreChain, show who can read it,
+// and open it if this address is on the list. Values stay in this component's
+// memory and appear one at a time, only on click.
+import { useEffect, useState } from "react";
 import { useIdentity } from "../lib/identity.tsx";
 import { errCode, errText, net, short } from "../lib/net.ts";
 import { checkFile, explain, remember, type CheckResult } from "../lib/ops.ts";
-import { openCoffer, parseCoffer, type CofferFile } from "../../../src/core/vault.ts";
-import { parseDotenv, type DotenvEntry } from "../../../src/core/dotenv.ts";
+import { work } from "../lib/crypto.ts";
+import { parseCoffer, type CofferFile } from "../../../src/core/vault.ts";
+import type { DotenvEntry } from "../../../src/core/dotenv.ts";
 import { grantHistory, type GrantRecord } from "../../../src/chain/qore.ts";
-import { DropText, Msg, TxLink } from "./bits.tsx";
+import { Addr, DropText, Problem, Result, TxLink } from "./bits.tsx";
+
+const VERDICT: Record<string, string> = {
+  ROLLBACK: "This is an old copy. A newer version exists, so it won't be opened.",
+  BAD_SIGNATURE: "Someone changed this file by hand, so it won't be opened.",
+  UNKNOWN_KEY: "Whoever signed this file hasn't set up Coffer, so it can't be checked.",
+  WRITER_NOT_READER: "The last person to change it isn't on its list, so it won't be opened.",
+};
 
 export function OpenFile() {
   const { id } = useIdentity();
@@ -16,7 +24,8 @@ export function OpenFile() {
   const [file, setFile] = useState<CofferFile | null>(null);
   const [check, setCheck] = useState<{ ok: true; r: CheckResult } | { ok: false; code?: string; msg: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
+  const [err, setErr] = useState<unknown>(null);
   const [entries, setEntries] = useState<DotenvEntry[] | null>(null);
 
   const mine = (() => { try { return localStorage.getItem("coffer.file"); } catch { return null; } })();
@@ -25,7 +34,7 @@ export function OpenFile() {
     setText(t); setErr(null); setCheck(null); setFile(null); setEntries(null);
     if (!t.trim()) return;
     let f: CofferFile;
-    try { f = parseCoffer(t); } catch (e) { setErr(explain(errCode(e), errText(e))); return; }
+    try { f = parseCoffer(t); } catch (e) { setErr(e); return; }
     setFile(f);
     setBusy(true);
     try {
@@ -39,11 +48,12 @@ export function OpenFile() {
     }
   }
 
-  function open() {
+  async function open() {
     if (!file || !id) return;
-    setErr(null);
-    try { setEntries(parseDotenv(new TextDecoder().decode(openCoffer(file, id.sealKeys)))); }
-    catch (e) { setErr(explain(errCode(e), errText(e))); }
+    setErr(null); setOpening(true);
+    try { setEntries(await work<DotenvEntry[]>("open", { text, keys: id.sealKeys })); }
+    catch (e) { setErr(e); }
+    finally { setOpening(false); }
   }
 
   const isReader = !!file && !!id && file.readers.includes(id.address);
@@ -51,28 +61,29 @@ export function OpenFile() {
   return (
     <div className="flow">
       <section className="step step-now">
-        <div className="step-body">
-          <DropText id="cofferfile" label=".env.coffer" value={text} onChange={(t) => void load(t)} rows={5} placeholder="Paste a sealed file, or drop it here" />
-          {mine && !text && <button className="btn btn-quiet btn-sm" onClick={() => void load(mine)}>Use the file from the guided flow</button>}
-          {err && <Msg kind="err">{err}</Msg>}
+        <div className="step-body step-body-full">
+          <div className={file ? "drop-loaded" : ""}>
+            <DropText id="cofferfile" label={file ? `Loaded ${file.name}.coffer. Paste or drop another to check it.` : "Your .env.coffer"} value={text} onChange={(t) => void load(t)} rows={file ? 2 : 5} placeholder="Paste a sealed file, or drop it here" />
+          </div>
+          {mine && !text && <button className="btn btn-quiet btn-sm" onClick={() => void load(mine)}>Use the file from Seal and share</button>}
+          {err !== null && <Problem error={err} text={errCode(err) === "BAD_FORMAT" ? "This isn't a Coffer file." : undefined} />}
         </div>
       </section>
 
       {file && (
         <>
           <div className={`verdict ${check ? (check.ok ? "verdict-ok" : "verdict-bad") : ""}`} aria-live="polite">
-            {busy || !check ? <p className="muted">Checking signatures and the chain record on QoreChain…</p> : check.ok ? (
+            {busy || !check ? <p className="prog-line"><span className="spin" aria-hidden />Checking it against QoreChain</p> : check.ok ? (
               <>
-                <p className="beat-word t-open display">Checks out</p>
-                <p>The owner's and the writer's ML-DSA-87 signatures match the keys registered on QoreChain, and this copy matches the owner's latest record.</p>
-                <p>Owner: <span className="mono">{file.owner}</span>. A valid signature proves who made the file, not that you know them: make sure this is your teammate's address before you use the values.</p>
+                <p className="beat-word t-open">Checks out</p>
+                <p>Signed by its owner, and the newest version on QoreChain.</p>
+                <p className="muted">Owner: <span className="mono">{short(file.owner)}</span>. A valid signature proves who made it, not that you know them: check this is your teammate.</p>
               </>
             ) : (
               <>
-                <p className="beat-word t-seal display">Refused</p>
-                <p>{explain(check.code, check.msg)}</p>
-                <p className="muted small mono">{check.code ? `${check.code}: ` : ""}{check.msg}</p>
-                <p className="muted small">Coffer won't open a file that fails these checks.</p>
+                <p className="beat-word t-seal">Refused</p>
+                <p>{VERDICT[check.code ?? ""] ?? explain(check.code, check.msg)}</p>
+                <details className="steps"><summary>Details</summary><p className="mono small">{check.code ? `${check.code}: ` : ""}{check.msg}</p></details>
               </>
             )}
           </div>
@@ -82,8 +93,8 @@ export function OpenFile() {
           {check?.ok && (
             <section className="opened">
               {!id ? <p className="muted">Make or restore your address in "Seal and share" to open files shared with you.</p> :
-                !isReader ? <Msg kind="note">Your address ({short(id.address)}) is not a reader of this file. Ask its owner to share it with you.</Msg> :
-                  !entries ? <button className="btn btn-seal" onClick={open}>Open with my address</button> :
+                !isReader ? <Result tone="seal">You're not on the list for this file. Ask its owner to share it with you.</Result> :
+                  !entries ? <button className="btn btn-seal" disabled={opening} onClick={open}>{opening ? <><span className="spin" aria-hidden />Opening</> : "Open with my address"}</button> :
                     <Values entries={entries} onClose={() => setEntries(null)} />}
             </section>
           )}
@@ -98,10 +109,7 @@ function Values({ entries, onClose }: { entries: DotenvEntry[]; onClose: () => v
   const [copied, setCopied] = useState<string | null>(null);
   return (
     <div className="values">
-      <div className="values-head">
-        <p className="label">{entries.length} {entries.length === 1 ? "value" : "values"}. Click one to show it.</p>
-        <button className="btn btn-quiet btn-sm" onClick={onClose}>Close</button>
-      </div>
+      <Result tone="open">Opened. {entries.length} {entries.length === 1 ? "value" : "values"}; tap one to show it.</Result>
       <ul>
         {entries.map((e) => (
           <li key={e.key}>
@@ -115,12 +123,17 @@ function Values({ entries, onClose }: { entries: DotenvEntry[]; onClose: () => v
           </li>
         ))}
       </ul>
-      <p className="muted small">Values live in this page's memory only. Close the page and they are gone.</p>
+      <div className="values-head">
+        <p className="muted small">Values live in this page's memory only. Close the page and they're gone.</p>
+        <button className="btn btn-quiet btn-sm" onClick={onClose}>Hide all</button>
+      </div>
     </div>
   );
 }
 
-/** The team view: readers, epoch, version, last writer, and the records on chain. */
+const OP_WORDS: Record<string, string> = { create: "Sealed", share: "Shared", revoke: "Revoked" };
+
+/** Who can read the file, as people; the raw numbers and records sit behind Details. */
 export function FileView({ file, me, teammate, history: given }: { file: CofferFile; me?: string; teammate?: string | null; history?: GrantRecord[] }) {
   const [open, setOpen] = useState(false);
   const [hist, setHist] = useState<GrantRecord[] | null>(given ?? null);
@@ -130,34 +143,39 @@ export function FileView({ file, me, teammate, history: given }: { file: CofferF
     if (!open || hist) return;
     grantHistory(net, file.owner, file.id).then(setHist).catch((e) => setErr(errText(e)));
   }, [open, hist, file.owner, file.id]);
-  const tag = (a: string) => [a === file.owner ? "owner" : null, a === me ? "you" : null, a === teammate ? "demo teammate" : null].filter(Boolean).join(", ");
-  const sorted = useMemo(() => [...file.readers].sort((a, b) => (a === file.owner ? -1 : b === file.owner ? 1 : 0)), [file]);
+  const who = (a: string) => (a === me ? (a === file.owner ? "You, the owner" : "You") : a === teammate ? "Demo teammate" : a === file.owner ? "The owner" : null);
+  const sorted = [...file.readers].sort((a, b) => (a === file.owner ? -1 : b === file.owner ? 1 : 0));
+  const name = (a: string) => (a === me ? "you" : a === teammate ? "the demo teammate" : short(a, 8, 5));
 
   return (
-    <section className="team" aria-label="Who can read this file">
-      <dl className="facts">
-        <div><dt>File</dt><dd className="mono">{file.name}.coffer</dd></div>
-        <div><dt>Epoch</dt><dd className="mono">{String(file.epoch)}</dd></div>
-        <div><dt>Version</dt><dd className="mono">{String(file.version)}</dd></div>
-        <div><dt>Last written by</dt><dd>{file.writer === file.owner ? "the owner" : <span className="mono">{short(file.writer)}</span>}</dd></div>
-      </dl>
-      <p className="label">Readers ({file.readers.length})</p>
-      <ul className="readers">
+    <section className="team" aria-label="Who can open this file">
+      <p className="label">Who can open it ({file.readers.length})</p>
+      <ul className="people">
         {sorted.map((a) => (
-          <li key={a}><span className="mono">{a}</span>{tag(a) && <span className="tag">{tag(a)}</span>}</li>
+          <li key={a}>
+            <span className="person-dot" aria-hidden />
+            <span className="person-name">{who(a) ?? "Teammate"}</span>
+            <Addr a={a} />
+          </li>
         ))}
       </ul>
       <details className="raw" onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
-        <summary>See the records on QoreChain</summary>
-        {err ? <Msg kind="err">{err}</Msg> : !hist ? <p className="muted small">Reading the owner's records…</p> : hist.length === 0 ? <p className="muted small">No records for this file on chain yet.</p> : (
+        <summary>Details</summary>
+        <dl className="facts">
+          <div><dt>File</dt><dd className="mono">{file.name}.coffer</dd></div>
+          <div><dt>File id</dt><dd className="mono">{file.id}</dd></div>
+          <div><dt>Epoch</dt><dd className="mono">{String(file.epoch)}</dd></div>
+          <div><dt>Version</dt><dd className="mono">{String(file.version)}</dd></div>
+        </dl>
+        <p className="label" style={{ marginTop: 14 }}>Records on QoreChain</p>
+        {err ? <Problem text="QoreChain can't be reached right now." error={new Error(err)} /> : !hist ? <p className="muted small">Reading the records…</p> : hist.length === 0 ? <p className="muted small">No records for this file yet.</p> : (
           <ol className="records">
             {hist.map((h) => (
               <li key={h.hash}>
-                <span className="mono rec-time">{h.time.slice(0, 16).replace("T", " ")}</span>
-                <span className={`rec-op rec-${h.op}`}>{h.op}</span>
-                <span className="mono">epoch {String(h.epoch)}</span>
-                <span className="rec-who">{[...h.added.map((a) => `added ${short(a)}`), ...h.removed.map((a) => `removed ${short(a)}`)].join(", ")}</span>
-                <TxLink hash={h.hash} />
+                <span className="rec-time">{new Date(h.time).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span>
+                <span className={`rec-op rec-${h.op}`}>{OP_WORDS[h.op] ?? h.op}</span>
+                <span className="rec-who">{[...h.added.map((a) => `added ${name(a)}`), ...h.removed.map((a) => `removed ${name(a)}`)].join(", ")}</span>
+                <TxLink hash={h.hash} label="view" />
               </li>
             ))}
           </ol>

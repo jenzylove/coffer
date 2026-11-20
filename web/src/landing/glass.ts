@@ -18,7 +18,7 @@ export interface Glass {
 
 const isDark = () => document.documentElement.dataset.theme === "dark";
 const MONO = '"DM Mono", ui-monospace, Consolas, monospace';
-const SANS = '"Onest", system-ui, sans-serif';
+const SANS = '"Onest Variable", system-ui, sans-serif';
 
 function textTexture(text: string, o: { color: string; size?: number; font?: string; weight?: number }) {
   const px = (o.size ?? 44);
@@ -90,17 +90,19 @@ function backdropTexture(dark: boolean) {
 
 type Item = { mesh: Mesh; mat: MeshBasicMaterial; pos: Vector3; target: Vector3; scale: number; tScale: number; opacity: number; tOpacity: number; h: number };
 
-export function createGlass(canvas: HTMLCanvasElement): Glass | null {
+export function createGlass(canvas: HTMLCanvasElement, opts: { onSlow?: () => void } = {}): Glass | null {
   let renderer: WebGLRenderer;
   try {
     renderer = new WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: "high-performance" });
   } catch { return null; }
   if (!renderer.capabilities.isWebGL2) { renderer.dispose(); return null; }
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+  (renderer as unknown as { transmissionResolutionScale: number }).transmissionResolutionScale = 0.5;
   renderer.toneMapping = ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
   renderer.outputColorSpace = SRGBColorSpace;
 
+  let disposed = false;
   const scene = new Scene();
   const pmrem = new PMREMGenerator(renderer);
   const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
@@ -117,12 +119,12 @@ export function createGlass(canvas: HTMLCanvasElement): Glass | null {
   // the seal: a thick lens with layered rims behind it
   const R = 1.55, T = 0.62;
   const prof: Vector2[] = [];
-  for (let i = 0; i <= 48; i++) {
-    const a = (i / 48) * Math.PI;
+  for (let i = 0; i <= 28; i++) {
+    const a = (i / 28) * Math.PI;
     const s = Math.sin(a);
     prof.push(new Vector2(R * Math.pow(s, 0.35), (T / 2) * -Math.cos(a)));
   }
-  const lens = new LatheGeometry(prof, 96);
+  const lens = new LatheGeometry(prof, 64);
   lens.rotateX(Math.PI / 2);
   const glassMat = new MeshPhysicalMaterial({
     color: new Color("#eef4ff"), metalness: 0, roughness: 0.32, transmission: 1, thickness: 0.9, ior: 1.5,
@@ -137,8 +139,8 @@ export function createGlass(canvas: HTMLCanvasElement): Glass | null {
     attenuationColor: new Color("#5a80ff"), attenuationDistance: 0.6, transparent: true, opacity: 0.95,
   });
   const rims: Mesh[] = [];
-  for (let i = 0; i < 3; i++) {
-    const rim = new Mesh(new TorusGeometry(R * (0.99 + i * 0.025), 0.1 - i * 0.022, 32, 200), rimMat);
+  for (let i = 0; i < 2; i++) {
+    const rim = new Mesh(new TorusGeometry(R * (0.99 + i * 0.03), 0.1 - i * 0.03, 12, 96), rimMat);
     rim.scale.z = 0.7;
     rim.position.set(-0.11 * (i + 1), 0.085 * (i + 1), -0.12 * (i + 1));
     seal.add(rim);
@@ -157,7 +159,7 @@ export function createGlass(canvas: HTMLCanvasElement): Glass | null {
     g.fillStyle = v; g.fillRect(0, 0, 512, 512);
     const t = new CanvasTexture(c); t.colorSpace = SRGBColorSpace; return t;
   })();
-  const core = new Mesh(new CircleGeometry(R * 0.96, 96), new MeshBasicMaterial({ map: coreTex, toneMapped: false }));
+  const core = new Mesh(new CircleGeometry(R * 0.96, 64), new MeshBasicMaterial({ map: coreTex, toneMapped: false }));
   core.position.z = -0.06;
   seal.add(core);
   // soft glow bleeding past the edge, like a studio render
@@ -179,10 +181,11 @@ export function createGlass(canvas: HTMLCanvasElement): Glass | null {
   const ripples: { mesh: Mesh; mat: MeshBasicMaterial; t0: number; hard: boolean }[] = [];
   const ripple = (color: string, hard: boolean) => {
     const mat = new MeshBasicMaterial({ color: new Color(color), transparent: true, opacity: 0.9, side: DoubleSide, toneMapped: false, depthWrite: false });
-    const mesh = new Mesh(new RingGeometry(R * 0.99, R * 1.012, 160), mat);
+    const mesh = new Mesh(new RingGeometry(R * 0.99, R * 1.012, 96), mat);
     mesh.position.z = T / 2 + 0.02;
     seal.add(mesh);
     ripples.push({ mesh, mat, t0: performance.now(), hard });
+    wake();
   };
 
   // movable text planes
@@ -195,6 +198,7 @@ export function createGlass(canvas: HTMLCanvasElement): Glass | null {
     parent.add(mesh);
     const it: Item = { mesh, mat, pos: new Vector3(), target: new Vector3(), scale: 1, tScale: 1, opacity: 0, tOpacity: 1, h };
     items.push(it);
+    wake();
     return it;
   };
   const drop = (it: Item) => { it.tOpacity = 0; (it as any).dead = true; };
@@ -215,7 +219,7 @@ export function createGlass(canvas: HTMLCanvasElement): Glass | null {
     camera.aspect = w / h;
     place();
   };
-  const ro = new ResizeObserver(resize);
+  const ro = new ResizeObserver(() => { resize(); wake(); });
   ro.observe(canvas);
   resize();
 
@@ -240,6 +244,7 @@ export function createGlass(canvas: HTMLCanvasElement): Glass | null {
         it.pos.set(x - 0.6, layout.linesY - i * gap, 0.6);
         it.target.set(x, layout.linesY - i * gap, 0.6);
         it.mesh.position.copy(it.pos);
+        wake();
         // anchor at the left edge
         it.mesh.geometry = plane;
         (it as any).left = true;
@@ -310,10 +315,12 @@ export function createGlass(canvas: HTMLCanvasElement): Glass | null {
       }, 620);
     },
     dispose() {
+      disposed = true;
       cancelAnimationFrame(raf);
       ro.disconnect(); io.disconnect();
       window.removeEventListener("coffer-theme", onTheme);
       window.removeEventListener("pointermove", onMove);
+      document.removeEventListener("visibilitychange", onVis);
       renderer.dispose(); pmrem.dispose(); envTex.dispose();
     },
   };
@@ -322,34 +329,56 @@ export function createGlass(canvas: HTMLCanvasElement): Glass | null {
     backMat.map?.dispose();
     backMat.map = backdropTexture(isDark());
     backMat.needsUpdate = true;
+    wake();
   };
   window.addEventListener("coffer-theme", onTheme);
   let mx = 0, my = 0;
-  const onMove = (e: PointerEvent) => { mx = e.clientX / innerWidth - 0.5; my = e.clientY / innerHeight - 0.5; };
+  const onMove = (e: PointerEvent) => { if (!visible) return; mx = e.clientX / innerWidth - 0.5; my = e.clientY / innerHeight - 0.5; settleUntil = performance.now() + 900; wake(); };
   window.addEventListener("pointermove", onMove);
+  const onVis = () => { if (!document.hidden) wake(); };
+  document.addEventListener("visibilitychange", onVis);
   let visible = true;
-  const io = new IntersectionObserver(([e]) => { visible = !!e?.isIntersecting; });
+  const io = new IntersectionObserver(([e]) => { visible = !!e?.isIntersecting; if (visible) wake(); });
   io.observe(canvas);
 
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  let glow = 0, shake = 0, raf = 0, last = performance.now();
-  const frame = (now: number) => {
+  let glow = 0, shake = 0, raf = 0, last = performance.now(), running = false, settleUntil = 0;
+  // fps probe: if the first rendered frames come slower than 40 fps, hand back to the CSS stage
+  const probe: number[] = [];
+  let probed = false, probeStart = 0;
+  function wake() {
+    if (running || disposed) return;
+    running = true;
+    last = performance.now();
     raf = requestAnimationFrame(frame);
-    if (!visible) return;
-    const dt = Math.min(0.25, (now - last) / 1000);
+  }
+  const frame = (now: number) => {
+    if (!visible || document.hidden || disposed) { running = false; return; }
+    const dtMs = now - last;
+    const dt = Math.min(0.25, dtMs / 1000);
     last = now;
+    if (!probed && dtMs > 0) {
+      // first frame includes shader compile: skip it, then judge within 10 frames or 1.5 s
+      if (probeStart === 0) probeStart = now; else probe.push(dtMs);
+      if (probe.length >= 10 || now - probeStart > 1500) {
+        probed = true;
+        const fps = probe.length / Math.max(0.001, (now - probeStart) / 1000);
+        if (fps < 40) { running = false; opts.onSlow?.(); return; }
+      }
+    }
+    let moving = now < settleUntil || ripples.length > 0 || shake > 0 || glow > 0.01 || !probed;
     const k = reduce ? 1 : 1 - Math.pow(0.0025, dt);
     const time = now / 1000;
     if (!reduce) {
-      seal.rotation.y = -0.5 + Math.sin(time * 0.35) * 0.12 + mx * 0.15;
-      seal.rotation.x = 0.12 + Math.sin(time * 0.27) * 0.05 + my * 0.1;
+      seal.rotation.y += (-0.5 + mx * 0.15 - seal.rotation.y) * Math.min(1, dt * 4);
+      seal.rotation.x += (0.12 + my * 0.1 - seal.rotation.x) * Math.min(1, dt * 4);
     }
     const sx = shake > 0 ? Math.sin(time * 70) * 0.08 * shake : 0;
     seal.position.x = layout.discX + sx;
     shake = Math.max(0, shake - dt * 2.2);
     glow = Math.max(0, glow - dt * 0.6);
     glassMat.emissiveIntensity = glow * 0.9;
-    rims.forEach((r, i) => { r.rotation.z = time * 0.05 * (i + 1); });
+    void time;
 
     for (let n = ripples.length - 1; n >= 0; n--) {
       const r = ripples[n]!;
@@ -363,6 +392,7 @@ export function createGlass(canvas: HTMLCanvasElement): Glass | null {
       const it = items[n]!;
       const d = (it as any).delay as number | undefined;
       if (d && now < d) continue;
+      if (it.pos.distanceToSquared(it.target) > 1e-6 || Math.abs(it.tOpacity - it.opacity) > 0.005) moving = true;
       it.pos.lerp(it.target, reduce ? 1 : k * 0.9);
       it.opacity += (it.tOpacity - it.opacity) * (reduce ? 1 : k);
       const w = it.mesh.scale.x;
@@ -375,7 +405,8 @@ export function createGlass(canvas: HTMLCanvasElement): Glass | null {
       }
     }
     renderer.render(scene, camera);
+    if (moving) raf = requestAnimationFrame(frame); else running = false;
   };
-  raf = requestAnimationFrame(frame);
+  wake();
   return api;
 }
