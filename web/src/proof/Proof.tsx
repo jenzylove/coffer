@@ -9,21 +9,23 @@ import { work } from "../lib/crypto.ts";
 interface Stats { relayer: { address: string; uqor: number | string }; drips24h: number; teammate: string | { address: string } }
 
 const RUN: { step: string; result: string; tx?: string }[] = [
-  { step: "Owner seals a .env and records the new file", result: "Done", tx: "FE210BDF968E360D03D7F952410A4C3029486030F19F3B807C90A3A89B595919" },
-  { step: "Owner shares with readers B and C", result: "Both run their app with the secrets", tx: "AEBA0CF76C741934A6FB4D70C5022007E5A3D4325A06F059D3A762886B6F4060" },
-  { step: "Owner revokes C", result: "B still runs; C gets \"not a reader\"", tx: "47DECAD5A58F4EFCA31C28EE12083F2A2F661D423390A446C7A160E36AAFCBAE" },
-  { step: "The copy from before the revoke is restored on a fresh machine", result: "Refused: the chain record shows a later epoch" },
-  { step: "The reader list is edited by hand", result: "Refused: the owner's signature fails" },
-  { step: "Plain text left on disk after every step", result: "None besides the original .env" },
+  { step: "Ada, the demo teammate, publishes her card", result: "The contract checked her ML-DSA-87 signature and kept it", tx: "0x8194c99e447ed6b221b82439251d0a28d1254e0628475393b1b57eb9fcec5d0f" },
+  { step: "The owner publishes a card", result: "Done", tx: "0xb1b04a1b50151351cb4d488784b4c4ecf8cc6db87ed79db21500519d352bb94f" },
+  { step: "The owner seals a .env to Ada (epoch 1)", result: "Ada opens it and reads the names", tx: "0x6bbe021b1fa7b944828fb5b0f7e895d1895af6f0bf11516ca623b358deabeb04" },
+  { step: "The owner removes Ada (epoch 2)", result: "Ada asks again: \"not a reader\"", tx: "0x985fb953b314d41d29b4f32648dfdd3ab8bca763a4aa9488586366f1880c4dcf" },
+  { step: "Ada sends back the epoch 1 copy", result: "Refused: QoreChain has a newer one (epoch 2)" },
+  { step: "A card from a wallet whose key has no proof of possession", result: "Refused by the contract" },
+  { step: "A card with someone else's key swapped in", result: "Refused by the contract: the signature does not match" },
 ];
 
-const SETUP: { who: string; mldsa: string; kem: string }[] = [
-  { who: "A, owner", mldsa: "BF50E7F789BC7F20D60B4BFB4CEF1C715222CAE08A6E0C4EB1A4B3967E82FAC4", kem: "7FEA6E38D9371DF260B8D15C1DB9C21D85221FECC5A40CD0EBD78DD28B58B2EB" },
-  { who: "B, reader kept", mldsa: "1BECDFF311C6A0F00F5EB3DA8C16BBB57A98AD8A019280C4AE109E7A4049D522", kem: "BEF9259C56672C03DB2AA9C471B262F31B39F5FCD5AA745FBD2F973B9064B95B" },
-  { who: "C, reader revoked", mldsa: "68ED75AFC3A3379FAE1EE867C8C3ACD31CBEC513A8E027D821A7E868443D04A0", kem: "A1B6DFB7293566CA0E431D114515027BA5331468E570EC4104922D770E66F8BE" },
+const SETUP: { who: string; tx: string }[] = [
+  { who: "Coffer contract deployed", tx: "0x6538ffa60a4e6424080eaa11f74a9bf921275e551d6a550c52289551a60223cd" },
+  { who: "Owner's ML-DSA-87 key, with proof of possession", tx: "AC8BA9B527DF0C3154ACE3E3524F0399E92E2B38B0BC295D6E56ED975DD5889D" },
+  { who: "Owner's ML-KEM-1024 key in the KEM registry", tx: "5E4FE9BEBA06489621527318EB3F63E8A78F18593DB4D3C87C496F05B0FA5830" },
 ];
 
-const Tx = ({ h }: { h: string }) => <a className="mono txlink" href={txUrl(h)} target="_blank" rel="noreferrer" title={h}>{short(h, 10, 8)}</a>;
+// EVM transactions (0x…) open on the dashboard explorer; native ones on the public REST node.
+const Tx = ({ h }: { h: string }) => <a className="mono txlink" href={h.startsWith("0x") ? `https://dashboard.qorechain.io/explorer/tx/${h}` : txUrl(h)} target="_blank" rel="noreferrer" title={h}>{short(h, 10, 8)}</a>;
 
 interface Config { chainId: string; contract: string | null; poster: string | null; teammate: string }
 interface Facts {
@@ -131,7 +133,7 @@ export default function Proof() {
           <Contract />
           <p className="muted">Each teammate's card and each file's latest change live here. The contract checks every signature with QoreChain's own ML-DSA-87 check, keeps the newest card per account, and only lets a file's record move forward.</p>
         </Row>
-        <Row n="03" title="A three person team on testnet" tag="recorded 17 Nov 2026, real CLI">
+        <Row n="03" title="A team on testnet, start to finish" tag="recorded 22 Nov 2026, real CLI">
           <ol className="prun">
             {RUN.map((r) => (
               <li key={r.step}>
@@ -142,22 +144,23 @@ export default function Proof() {
             ))}
           </ol>
           <details className="mini">
-            <summary>The six setup transactions</summary>
+            <summary>The contract and the owner's setup</summary>
             <ol className="prun">
               {SETUP.map((s) => (
-                <li key={s.who}><span>{s.who}</span><span>signing key <Tx h={s.mldsa} /></span><span>sealing key <Tx h={s.kem} /></span></li>
+                <li key={s.who}><span>{s.who}</span><Tx h={s.tx} /></li>
               ))}
             </ol>
+            <p className="muted small">EVM transactions open on the dashboard explorer: switch it to Testnet there.</p>
           </details>
         </Row>
-        <Row n="04" title="Sizes and costs" tag="measured 17 Nov 2026">
+        <Row n="04" title="Sizes and costs" tag="measured 22 Nov 2026">
           <dl className="facts facts-big">
-            <div><dt>Setup per reader, once</dt><dd className="mono">0.054 QOR</dd></div>
-            <div><dt>Each share or revoke record</dt><dd className="mono">about 0.017 QOR</dd></div>
+            <div><dt>A card, once per person</dt><dd className="mono">about 0.06 QOR</dd></div>
+            <div><dt>Each seal, share or remove</dt><dd className="mono">0.03 to 0.04 QOR</dd></div>
             <div><dt>Key envelope, per reader</dt><dd className="mono">about 1.6 KB</dd></div>
             <div><dt>Overhead on the data</dt><dd className="mono">about 100 bytes</dd></div>
           </dl>
-          <p className="muted">Setup is 278,305 gas for the ML-DSA-87 key and 247,481 gas for the ML-KEM-1024 key, at 0.1 uqor per gas. A 94 byte .env sealed to 194 bytes; the key envelope for three readers was 4,997 bytes. Sealing took 79 ms locally.</p>
+          <p className="muted">A card is about 589,500 gas and a file record 290,000 to 361,000 gas, at 101 gwei on the testnet EVM; the Coffer server pays both, so a QoreX user pays nothing. Most of a card's cost is the 4,627 byte ML-DSA-87 signature and the 1,568 byte ML-KEM-1024 key the contract checks and keeps in its event.</p>
         </Row>
         <Row n="05" title="The Coffer server, right now" tag="live">
           <Live />
