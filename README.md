@@ -27,7 +27,7 @@
 |---|---|
 | Live site | https://coffer.jdollar.site |
 | The app (QoreX, or no wallet at all) | https://coffer.jdollar.site/app |
-| The Coffer contract (testnet) | `0xe94094e3e67d0c9c37b478616e3f5240127f40c9` on `qorechain-diana` ([deploy tx](https://dashboard.qorechain.io/explorer/tx/0x6538ffa60a4e6424080eaa11f74a9bf921275e551d6a550c52289551a60223cd), [source](contracts/src/Coffer.sol)) |
+| The Coffer contract (testnet) | `0x598d87f328739a6155486b41e4d191ff9e7f7d24` on `qorechain-diana` ([deploy tx](https://dashboard.qorechain.io/explorer/tx/0x57f8124d215e7b15659e917eae82192209982e1a8ce430d8197e64b97a890a68), [source](contracts/src/Coffer.sol)) |
 | Proof of the testnet runs | https://coffer.jdollar.site/proof and [docs/BUILD_LOG.md](docs/BUILD_LOG.md) |
 | Product spec | [docs/PRD.md](docs/PRD.md) |
 
@@ -51,6 +51,7 @@ share / remove ──► new epoch, reseal, one owner signature, recorded on cha
 ```
 
 - **Share with a wallet address.** QoreX cannot put an encryption key in QoreChain's KEM registry, and it cannot decrypt for apps. What it can do is sign a message with both of its keys. Coffer has it sign a QoreSeal recipient card ("seal to these keys"). The Coffer contract rebuilds the card text, reads the wallet's ML-DSA-87 key from the chain (0x0A02, proof of possession required) and verifies the signature (0x0A01). From then on anyone can seal to that wallet address. The opening keys stay in the teammate's browser; **Save my key file** moves them to another computer.
+- **Sharing delivers.** Each change carries the whole sealed file on chain, and the contract keeps a list of the files shared with each address. A teammate's Coffer (or `coffer inbox`) finds the file under their own address: no download, no copy, no commit needed.
 - **Invite anyone.** Paste an address that has no card yet and Coffer gives you an invite link. They connect QoreX and sign once; on your side their row turns into **Seal them in**.
 - **One signature per change.** Sealing, sharing and removing each ask the owner's wallet for exactly one approval. QoreX shows the file name and every address that can open it.
 - **The chain refuses old copies.** The contract binds each file to its owner and only lets its epoch go up. Before opening, Coffer compares the file with its head on chain: an old copy (with a removed reader still in it), a copy relabelled with another owner, or a copy QoreChain never saw is refused.
@@ -81,21 +82,23 @@ npx github:jenzylove/coffer run -- npm start     # secrets in the child process 
 npx github:jenzylove/coffer import               # move a dotenvx .env + .env.keys over
 npx github:jenzylove/coffer set KEY              # change a value (asks for it); no plain text on disk
 npx github:jenzylove/coffer status               # readers, epoch, signature check, the record on chain
+npx github:jenzylove/coffer inbox                # files shared with you, found on QoreChain
+npx github:jenzylove/coffer pull <id>            # save the latest copy of a shared file from the chain
 ```
 
 The CLI keeps its key in `~/.coffer/identity`. On a server or in CI, set `COFFER_IDENTITY` instead.
 
-A run on testnet, 22 Nov 2026 (CLI owner and the demo teammate):
+A run on testnet, 22 Nov 2026: two people on the CLI, nothing copied between them.
 
 | Step | Result |
 |---|---|
-| Contract deployed | `0x6538ffa60a4e6424080eaa11f74a9bf921275e551d6a550c52289551a60223cd` |
-| Demo teammate's card | `0x8194c99e447ed6b221b82439251d0a28d1254e0628475393b1b57eb9fcec5d0f` |
-| Owner's card | `0xb1b04a1b50151351cb4d488784b4c4ecf8cc6db87ed79db21500519d352bb94f` |
-| File sealed to the teammate (epoch 1) | `0x6bbe021b1fa7b944828fb5b0f7e895d1895af6f0bf11516ca623b358deabeb04` |
-| Teammate removed (epoch 2) | `0x985fb953b314d41d29b4f32648dfdd3ab8bca763a4aa9488586366f1880c4dcf` |
-| Teammate opens epoch 2 | refused: not a reader |
-| Teammate sends back the epoch 1 copy | refused: QoreChain has a newer one (epoch 2) |
+| Contract deployed | `0x57f8124d215e7b15659e917eae82192209982e1a8ce430d8197e64b97a890a68` |
+| Demo teammate's card | `0x206b033d100c156f0ce60d5c4de3ae425c832d9da1b235cd04db35945043cbcb` |
+| Owner seals a .env to the teammate (epoch 1); the sealed file goes on chain with it | `0xe79f5978f3dd39c85ada09ecd5a61b2ac5ddde18b463cede6e0875f3a67fca7b` |
+| Teammate runs `coffer inbox`, then `coffer pull` and `coffer run` | the file is listed under their address; their app gets the values |
+| Owner removes the teammate (epoch 2) | `0xecce0e1de5e982a1a44bc6a2720ef9eff9d244e04a91b6f38b35cc713307e9c4` |
+| Teammate's inbox | "you were removed"; the new version does not open for them |
+| An epoch 1 copy sent back to the demo teammate | refused: QoreChain has a newer one |
 
 Open any hash on the [dashboard explorer](https://dashboard.qorechain.io/explorer) with the network set to Testnet.
 
@@ -141,8 +144,8 @@ On 17 Nov 2026 GitHub code search returned **2,284** public files containing `DO
 ## Develop
 
 ```bash
-npm install && npm test                    # 38 unit tests, no network
-cd contracts && forge install foundry-rs/forge-std --no-git && forge test   # 16 contract tests
+npm install && npm test                    # 39 unit tests, no network
+cd contracts && forge install foundry-rs/forge-std --no-git && forge test   # 17 contract tests
 node contracts/script/vectors.ts           # regenerate the byte for byte test vectors from the TypeScript code
 cd web && npm install && npm run dev
 RELAYER_MNEMONIC=... TEAMMATE_MNEMONIC=... POSTER_MNEMONIC=... node server/index.ts
