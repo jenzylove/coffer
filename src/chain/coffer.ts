@@ -4,7 +4,7 @@
 // here the Coffer server, which pays the gas. Works in Node and the browser.
 import {
   bytesToHex, decodeErrorResult, decodeEventLog, decodeFunctionResult, encodeEventTopics, encodeFunctionData,
-  getAddress, hexToBytes, parseAbi, toHex, type Hex,
+  getAddress, hexToBytes, keccak256, parseAbi, toHex, type Hex,
 } from "viem";
 import { addressFromBytes, parseAddress } from "@qorechain/qoresign";
 import { fetchPqKeyStatus } from "@qorechain/qoresign/network";
@@ -22,6 +22,15 @@ export const COFFER_ABI = parseAbi([
   "function changeText(Change c) view returns (bytes)",
   "function filesOf(address account) view returns (bytes16[])",
   "function site() view returns (string)",
+  "struct OpenRequest { bytes16 file; uint64 epoch; address reader; uint64 nonce; }",
+  "struct OpenRecord { address reader; uint64 epoch; uint64 blockNumber; }",
+  "function open(OpenRequest r, bytes deviceKey, bytes sig, bytes release)",
+  "function setDevice(address account, bytes deviceKey, uint64 untilBlock, bytes pqSig)",
+  "function opensOf(bytes16 file) view returns (OpenRecord[])",
+  "function memberAt(bytes16 file, address account) view returns (uint64)",
+  "function devices(address account, bytes32 id) view returns (uint64)",
+  "event Opened(bytes16 indexed file, address indexed reader, uint64 epoch, uint64 nonce, bytes32 device, bytes release)",
+  "event DeviceSet(address indexed account, bytes32 indexed device, uint64 untilBlock)",
   "function cardText(address account, bytes32 mlkemSha3, bytes32 x25519, string issuedAt) view returns (bytes)",
   "event CardSet(address indexed account, bytes32 mlkemSha3, bytes32 x25519, string issuedAt, bytes mlkemKey, bytes card)",
   "event HeadSet(bytes16 indexed file, address indexed owner, uint64 epoch, uint64 version, bytes32 access, bytes32 data, string name, bytes sealedFile)",
@@ -36,6 +45,13 @@ export const COFFER_ABI = parseAbi([
   "error BadReaders()",
   "error BadFile()",
   "error PrecompileInactive()",
+  "error BadEpoch()",
+  "error NoHead()",
+  "error NotReader(address reader)",
+  "error UsedNonce()",
+  "error DeviceNotApproved()",
+  "error BadDevice()",
+  "error BadRelease()",
 ]);
 
 export interface EvmNetwork {
@@ -65,7 +81,7 @@ export async function rpc<T>(url: string, method: string, params: unknown[]): Pr
   return b.result as T;
 }
 
-async function call<F extends "cards" | "heads" | "filesOf">(net: EvmNetwork, functionName: F, args: readonly unknown[]) {
+async function call<F extends "cards" | "heads" | "filesOf" | "opensOf" | "memberAt" | "devices">(net: EvmNetwork, functionName: F, args: readonly unknown[]) {
   const data = encodeFunctionData({ abi: COFFER_ABI, functionName, args } as never);
   const out = await rpc<Hex>(net.evm, "eth_call", [{ to: net.coffer, data }, "latest"]);
   if (!out || out === "0x") throw new CofferError("EVM_ERROR", "the Coffer contract did not answer (wrong network or address)");
@@ -174,6 +190,48 @@ export async function readFile(net: EvmNetwork, fileId: string): Promise<Deliver
   throw new CofferError("EVM_ERROR", "the file's record could not be read back from the chain");
 }
 
+// ---- opens -----------------------------------------------------------------------
+
+/** One recorded open of a file. */
+export interface OpenLog { reader: string; epoch: bigint; block: number }
+
+/** Every open of a file, oldest first: the access log, read from the contract. */
+export async function readOpens(net: EvmNetwork, fileId: string): Promise<OpenLog[]> {
+  const rows = (await call(net, "opensOf", [`0x${fileId}`])) as unknown as { reader: Hex; epoch: bigint; blockNumber: bigint }[];
+  return [...rows].map((r) => ({ reader: qorAddress(r.reader), epoch: r.epoch, block: Number(r.blockNumber) }));
+}
+
+/** Is this address on the file's current list (the contract's own check)? */
+export async function isCurrentReader(net: EvmNetwork, fileId: string, address: string): Promise<boolean> {
+  const head = await readHead(net, fileId);
+  if (!head) return false;
+  const at = (await call(net, "memberAt", [`0x${fileId}`, evmAddress(address)])) as unknown as bigint;
+  return at === head.epoch;
+}
+
+/** The last block a device key may sign opens for this account (0 if never approved). */
+export async function deviceUntil(net: EvmNetwork, account: string, deviceKey: Uint8Array): Promise<bigint> {
+  return (await call(net, "devices", [evmAddress(account), keccak256(deviceKey)])) as unknown as bigint;
+}
+
+/** The arguments for open(). `deviceKey` empty when the reader's own account key signed. */
+export function openCall(r: { file: string; epoch: bigint; reader: string; nonce: bigint }, deviceKey: Uint8Array, sig: Uint8Array, release: Uint8Array) {
+  return {
+    functionName: "open" as const,
+    args: [{ file: `0x${r.file}` as Hex, epoch: r.epoch, reader: evmAddress(r.reader), nonce: r.nonce }, bytesToHex(deviceKey), bytesToHex(sig), bytesToHex(release)] as const,
+  };
+}
+
+/** The arguments for setDevice(), from the account's QoreSign signature over deviceText. */
+export function deviceCall(account: string, deviceKey: Uint8Array, untilBlock: bigint, pqSigB64: string) {
+  return { functionName: "setDevice" as const, args: [evmAddress(account), bytesToHex(deviceKey), untilBlock, b64ToHex(pqSigB64)] as const };
+}
+
+/** The current EVM block number. */
+export async function blockNumber(net: EvmNetwork): Promise<bigint> {
+  return BigInt(await rpc<Hex>(net.evm, "eth_blockNumber", []));
+}
+
 /** A contract refusal in plain words, or null if `data` is not one of ours. */
 export function refusalText(data: Hex | undefined): string | null {
   if (!data || data === "0x") return null;
@@ -191,6 +249,13 @@ export function refusalText(data: Hex | undefined): string | null {
       case "BadReaders": return "the reader list is not in the form the contract needs";
       case "BadFile": return "the sealed file is empty or larger than 64 KB";
       case "PrecompileInactive": return "QoreChain's post-quantum precompiles are not active on this network";
+      case "BadEpoch": return "that version of the file is not one QoreChain knows";
+      case "NoHead": return "this file is not recorded on QoreChain";
+      case "NotReader": return `${qorAddress(e.args![0] as Hex)} is not on this file's list any more, so QoreChain will not release it`;
+      case "UsedNonce": return "that open request was already used";
+      case "DeviceNotApproved": return "this device is not approved for that wallet right now";
+      case "BadDevice": return "that device key is not valid";
+      case "BadRelease": return "the release piece is missing or too large";
     }
   } catch { /* not ours */ }
   return null;

@@ -6,7 +6,7 @@ import { keccak_256 } from "@noble/hashes/sha3.js";
 import { recipientCardFields, recipientCardText } from "@qorechain/qoreseal";
 import { parseAddress } from "@qorechain/qoresign";
 import { identityFromMnemonic } from "../../src/core/identity.ts";
-import { changeText, sortByAddress, SITE } from "../../src/core/vault.ts";
+import { changeText, deviceText, openText, sortByAddress, SITE } from "../../src/core/vault.ts";
 
 const MNEMONIC = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
 const CHAIN = "qorechain-diana";
@@ -19,6 +19,9 @@ const access = "a".repeat(64), data = "b".repeat(64);
 const OTHER = "qor1wyvfhue6jja02pd2gqfm6rc6hl6jwv0afq5qja";
 const readers = sortByAddress([id.address, OTHER]);
 const change = changeText({ id: file, epoch: 3n, version: 12n, access, data, name: ".env", readers });
+const openT = openText({ file, epoch: 3n, reader: OTHER, nonce: 42n });
+const DEVICE_ID = "cd".repeat(32);
+const deviceT = deviceText({ account: OTHER, id: DEVICE_ID, untilBlock: 123456n });
 const evmOf = (a: string) => toChecksum("0x" + Buffer.from(parseAddress(a).bytes).toString("hex"));
 
 const lit = (s: string) => `hex"${Buffer.from(s, "utf8").toString("hex")}"`;
@@ -42,6 +45,9 @@ library Vectors {
     address internal constant OTHER = ${evmOf(OTHER)};
     address internal constant READER_0 = ${evmOf(readers[0]!)}; // ascending address order
     address internal constant READER_1 = ${evmOf(readers[1]!)};
+    bytes internal constant OPEN_TEXT = ${lit(openT)}; // file FILE, epoch 3, reader OTHER, nonce 42
+    bytes32 internal constant DEVICE_ID = 0x${DEVICE_ID};
+    bytes internal constant DEVICE_TEXT = ${lit(deviceT)}; // account OTHER, until block 123456
     bytes internal constant CHANGE_TEXT = ${lit(change)};
 }
 `;

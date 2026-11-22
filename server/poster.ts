@@ -7,7 +7,7 @@ import { createPublicClient, createWalletClient, defineChain, encodeFunctionData
 import { privateKeyToAccount } from "viem/accounts";
 import { StargateClient } from "@cosmjs/stargate";
 import {
-  EthNativeSigner, buildRegisterPqcKeyMsg, deriveUnifiedAccount, fetchPqcStatus, signProofOfPossession, type UnifiedAccount,
+  EthNativeSigner, buildRegisterPqcKeyMsg, closeEvmWindowMsg, deriveUnifiedAccount, fetchPqcStatus, signProofOfPossession, type UnifiedAccount,
 } from "@qorechain/sdk";
 import { evmWindowStatus, openEvmWindowMessage } from "@qorechain/evm";
 import { COFFER_ABI, refusalText } from "../src/chain/coffer.ts";
@@ -112,7 +112,14 @@ export class Poster {
   }
 
   /** Call the contract. Simulates first, so a refusal costs nothing and comes back in plain words. */
-  async call(functionName: "setCard" | "setHead", args: readonly unknown[]) {
+  /** Close any open window and open one scoped to this poster's contract (after the contract changed). */
+  async resetWindow() {
+    const w = await evmWindowStatus({ rest: POSTER_NET.rest, address: this.acc.cosmos });
+    if (w.found && w.live) await this.native("hybrid", [closeEvmWindowMsg(this.acc.cosmos)], "close the poster's old window");
+    await this.ensureWindow();
+  }
+
+  async call(functionName: CofferCall, args: readonly unknown[]) {
     if (!this.contract) throw new PosterError("the Coffer contract is not deployed yet", 503);
     return this.serial(async () => {
       let gas: bigint;
@@ -133,5 +140,6 @@ export class Poster {
   }
 }
 
-const encode = (functionName: "setCard" | "setHead", args: readonly unknown[]) =>
+type CofferCall = "setCard" | "setHead" | "open" | "setDevice";
+const encode = (functionName: CofferCall, args: readonly unknown[]) =>
   encodeFunctionData({ abi: COFFER_ABI, functionName, args } as never);

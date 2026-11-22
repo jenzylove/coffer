@@ -259,6 +259,139 @@ contract CofferTest is Test {
         c.setHead(change(3, 12), "", SIG);
     }
 
+    // ---- opens ------------------------------------------------------------------
+
+    event Opened(bytes16 indexed file, address indexed reader, uint64 epoch, uint64 nonce, bytes32 device, bytes release);
+    event DeviceSet(address indexed account, bytes32 indexed device, uint64 untilBlock);
+
+    bytes constant RELEASE = hex"0badc0de";
+
+    function req(uint64 epoch, address reader, uint64 nonce) internal pure returns (Coffer.OpenRequest memory) {
+        return Coffer.OpenRequest(V.FILE, epoch, reader, nonce);
+    }
+
+    /// A head at `epoch` whose readers are V.READER_0 and V.READER_1 (V.ACCOUNT and V.OTHER).
+    function headAt(uint64 epoch) internal {
+        Coffer.Change memory ch = change(epoch, epoch);
+        allowHead(ch);
+        c.setHead(ch, FILE_TEXT, SIG);
+    }
+
+    function test_open_and_device_texts_match_vault() public {
+        headAt(3);
+        assertEq(c.openText(req(3, V.OTHER, 42)), V.OPEN_TEXT);
+        assertEq(c.deviceText(V.OTHER, V.DEVICE_ID, 123456), V.DEVICE_TEXT);
+    }
+
+    function test_current_reader_opens_with_own_key_and_it_is_logged() public {
+        headAt(3);
+        MockStatus(STATUS).set(V.OTHER, true, 1, hex"0707", true);
+        MockVerify(VERIFY).allow(hex"0707", SIG, signed(c.openText(req(3, V.OTHER, 42))));
+        vm.expectEmit(true, true, false, true);
+        emit Opened(V.FILE, V.OTHER, 3, 42, bytes32(0), RELEASE);
+        c.open(req(3, V.OTHER, 42), "", SIG, RELEASE);
+        Coffer.OpenRecord[] memory log = c.opensOf(V.FILE);
+        assertEq(log.length, 1);
+        assertEq(log[0].reader, V.OTHER);
+        assertEq(log[0].epoch, 3);
+        // the same request cannot be replayed
+        vm.expectRevert(Coffer.UsedNonce.selector);
+        c.open(req(3, V.OTHER, 42), "", SIG, RELEASE);
+    }
+
+    function test_removed_reader_cannot_open_any_copy_old_or_new() public {
+        headAt(3);
+        MockStatus(STATUS).set(V.OTHER, true, 1, hex"0707", true);
+        // epoch 4: the owner alone
+        Coffer.Change memory ch = change(4, 4);
+        address[] memory rs = new address[](1);
+        rs[0] = V.ACCOUNT;
+        ch.readers = rs;
+        allowHead(ch);
+        c.setHead(ch, FILE_TEXT, SIG);
+        // the copy of epoch 3 they still hold, with a perfectly valid signature: refused
+        MockVerify(VERIFY).allow(hex"0707", SIG, signed(c.openText(req(3, V.OTHER, 1))));
+        vm.expectRevert(abi.encodeWithSelector(Coffer.NotReader.selector, V.OTHER));
+        c.open(req(3, V.OTHER, 1), "", SIG, RELEASE);
+        vm.expectRevert(abi.encodeWithSelector(Coffer.NotReader.selector, V.OTHER));
+        c.open(req(4, V.OTHER, 2), "", SIG, RELEASE);
+        // someone never on the list: refused
+        vm.expectRevert(abi.encodeWithSelector(Coffer.NotReader.selector, address(0xD00D)));
+        c.open(req(4, address(0xD00D), 3), "", SIG, RELEASE);
+        // added back at epoch 5: opens again
+        Coffer.Change memory back = change(5, 5);
+        allowHead(back);
+        c.setHead(back, FILE_TEXT, SIG);
+        MockVerify(VERIFY).allow(hex"0707", SIG, signed(c.openText(req(5, V.OTHER, 4))));
+        c.open(req(5, V.OTHER, 4), "", SIG, RELEASE);
+    }
+
+    function test_open_needs_the_readers_signature() public {
+        headAt(3);
+        MockStatus(STATUS).set(V.OTHER, true, 1, hex"0707", true);
+        vm.expectRevert(Coffer.BadSignature.selector);
+        c.open(req(3, V.OTHER, 42), "", SIG, RELEASE);
+    }
+
+    function test_open_bad_inputs_refused() public {
+        vm.expectRevert(Coffer.NoHead.selector);
+        c.open(req(3, V.OTHER, 1), "", SIG, RELEASE);
+        headAt(3);
+        vm.expectRevert(Coffer.BadEpoch.selector);
+        c.open(req(4, V.OTHER, 1), "", SIG, RELEASE);
+        vm.expectRevert(Coffer.BadEpoch.selector);
+        c.open(req(0, V.OTHER, 1), "", SIG, RELEASE);
+        vm.expectRevert(Coffer.BadRelease.selector);
+        c.open(req(3, V.OTHER, 1), "", SIG, "");
+        vm.expectRevert(Coffer.BadDevice.selector);
+        c.open(req(3, V.OTHER, 1), hex"01", SIG, RELEASE);
+    }
+
+    function test_device_approved_by_the_account_opens_until_it_expires() public {
+        headAt(3);
+        MockStatus(STATUS).set(V.OTHER, true, 1, hex"0707", true);
+        bytes memory dev = new bytes(2592);
+        dev[0] = 0x42;
+        bytes32 id = keccak256(dev);
+        uint64 until = uint64(block.number + 100);
+        // not approved yet
+        MockVerify(VERIFY).allow(dev, SIG, signed(c.openText(req(3, V.OTHER, 1))));
+        vm.expectRevert(Coffer.DeviceNotApproved.selector);
+        c.open(req(3, V.OTHER, 1), dev, SIG, RELEASE);
+        // the account approves it (one wallet signature)
+        MockVerify(VERIFY).allow(hex"0707", SIG, signed(c.deviceText(V.OTHER, id, until)));
+        vm.expectEmit(true, true, false, true);
+        emit DeviceSet(V.OTHER, id, until);
+        c.setDevice(V.OTHER, dev, until, SIG);
+        c.open(req(3, V.OTHER, 1), dev, SIG, RELEASE);
+        // a different device signature over another request: refused
+        vm.expectRevert(Coffer.BadSignature.selector);
+        c.open(req(3, V.OTHER, 2), dev, SIG, RELEASE);
+        // after it expires
+        vm.roll(block.number + 101);
+        MockVerify(VERIFY).allow(dev, SIG, signed(c.openText(req(3, V.OTHER, 3))));
+        vm.expectRevert(Coffer.DeviceNotApproved.selector);
+        c.open(req(3, V.OTHER, 3), dev, SIG, RELEASE);
+    }
+
+    function test_device_approval_must_be_signed_by_the_account_and_short() public {
+        bytes memory dev = new bytes(2592);
+        uint64 until = uint64(block.number + 100);
+        MockStatus(STATUS).set(V.OTHER, true, 1, hex"0707", true);
+        vm.expectRevert(Coffer.BadSignature.selector);
+        c.setDevice(V.OTHER, dev, until, SIG);
+        vm.expectRevert(Coffer.BadDevice.selector);
+        c.setDevice(V.OTHER, dev, uint64(block.number + 200_001), SIG);
+        vm.expectRevert(Coffer.BadDevice.selector);
+        c.setDevice(V.OTHER, hex"0102", until, SIG);
+    }
+
+    function test_epoch_zero_head_refused() public {
+        Coffer.Change memory ch = change(0, 1);
+        vm.expectRevert(Coffer.BadEpoch.selector);
+        c.setHead(ch, FILE_TEXT, SIG);
+    }
+
     function test_inactive_precompile_is_an_error() public {
         vm.etch(STATUS, "");
         vm.expectRevert(Coffer.PrecompileInactive.selector);

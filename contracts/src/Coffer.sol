@@ -18,6 +18,15 @@ pragma solidity ^0.8.28;
 ///    compare a file against its head, so an old copy (with a removed reader
 ///    still in it) or a copy from someone else is refused.
 ///
+/// 3. Opens. A file's contents need two pieces: the reader's own (sealed to
+///    them in the file) and a release piece only the file's keeper can unwrap.
+///    Every open is a request signed by the reader (or by a device key the
+///    reader's wallet approved for a while). The contract refuses it unless the
+///    reader is on the file's current list, then records the open together
+///    with the release piece sealed to that reader. Remove someone, or lose a
+///    laptop, and nothing opens for that address any more, old copies included;
+///    every open that did happen is on chain.
+///
 /// Nothing here trusts msg.sender: anyone may submit, only signatures count.
 contract Coffer {
     address internal constant VERIFY = 0x0000000000000000000000000000000000000a01;
@@ -26,6 +35,10 @@ contract Coffer {
     uint256 internal constant MAX_NAME = 64;
     uint256 internal constant MAX_READERS = 64;
     uint256 internal constant MAX_FILE = 65536;
+    uint256 internal constant ML_DSA_87_PUBLIC_KEY_LENGTH = 2592;
+    uint256 internal constant MAX_RELEASE = 4096;
+    /// A device approval lasts at most this many blocks (about 3 days at 1.4 s).
+    uint64 internal constant MAX_DEVICE_BLOCKS = 200_000;
 
     /// The Cosmos chain id the signatures are bound to, e.g. "qorechain-diana".
     string public chainId;
@@ -65,6 +78,28 @@ contract Coffer {
     /// Every file an account was ever a reader of (owners included), oldest first.
     mapping(address => bytes16[]) internal _files;
     mapping(address => mapping(bytes16 => bool)) public listed;
+    /// The last epoch an account was on a file's reader list. Equal to the head's epoch: a current reader.
+    mapping(bytes16 => mapping(address => uint64)) public memberAt;
+    /// Device keys an account approved: keccak256(ML-DSA-87 public key) => last block it may sign at.
+    mapping(address => mapping(bytes32 => uint64)) public devices;
+    /// Open request nonces already used, per reader.
+    mapping(address => mapping(uint64 => bool)) public usedNonce;
+
+    /// One recorded open: who, which epoch of the file, and when.
+    struct OpenRecord {
+        address reader;
+        uint64 epoch;
+        uint64 blockNumber;
+    }
+    mapping(bytes16 => OpenRecord[]) internal _opens;
+
+    /// One request to open a file, signed by the reader or by one of its approved devices.
+    struct OpenRequest {
+        bytes16 file;
+        uint64 epoch;
+        address reader;
+        uint64 nonce;
+    }
 
     event CardSet(
         address indexed account, bytes32 mlkemSha3, bytes32 x25519, string issuedAt, bytes mlkemKey, bytes card
@@ -80,6 +115,9 @@ contract Coffer {
         string name,
         bytes sealedFile
     );
+    event DeviceSet(address indexed account, bytes32 indexed device, uint64 untilBlock);
+    /// `release` is the file's release piece for that epoch, sealed to the reader (ciphertext).
+    event Opened(bytes16 indexed file, address indexed reader, uint64 epoch, uint64 nonce, bytes32 device, bytes release);
 
     error NoProvenKey(address account);
     error BadSignature();
@@ -92,6 +130,13 @@ contract Coffer {
     error BadReaders();
     error BadFile();
     error PrecompileInactive();
+    error BadEpoch();
+    error NoHead();
+    error NotReader(address reader);
+    error UsedNonce();
+    error DeviceNotApproved();
+    error BadDevice();
+    error BadRelease();
 
     constructor(string memory chainId_, string memory site_) {
         chainId = chainId_;
@@ -155,6 +200,7 @@ contract Coffer {
     /// the file under is exactly the one the owner approved.
     function setHead(Change calldata c, bytes calldata sealedFile, bytes calldata pqSig) external {
         if (sealedFile.length == 0 || sealedFile.length > MAX_FILE) revert BadFile();
+        if (c.epoch == 0) revert BadEpoch();
         Head memory h = heads[c.file];
         if (h.owner != address(0)) {
             if (h.owner != c.owner) revert NotOwner(h.owner);
@@ -164,6 +210,7 @@ contract Coffer {
         heads[c.file] = Head(c.owner, c.epoch, c.version, uint64(block.number), c.access, c.data);
         for (uint256 i; i < c.readers.length; ++i) {
             address r = c.readers[i];
+            memberAt[c.file][r] = c.epoch;
             if (!listed[r][c.file]) {
                 listed[r][c.file] = true;
                 _files[r].push(c.file);
@@ -218,6 +265,80 @@ contract Coffer {
         if (!hasOwner) revert BadReaders();
     }
 
+    // ---- opens -----------------------------------------------------------------
+
+    /// Approve a device key (made and kept in one browser or machine) to sign open
+    /// requests for `account` until `untilBlock`. Signed once by the account's own
+    /// ML-DSA-87 key (one QoreX approval). An `untilBlock` in the past revokes it.
+    function setDevice(address account, bytes calldata deviceKey, uint64 untilBlock, bytes calldata pqSig) external {
+        if (deviceKey.length != ML_DSA_87_PUBLIC_KEY_LENGTH) revert BadDevice();
+        if (untilBlock > block.number + MAX_DEVICE_BLOCKS) revert BadDevice();
+        bytes32 id = keccak256(deviceKey);
+        _verify(account, deviceText(account, id, untilBlock), pqSig);
+        devices[account][id] = untilBlock;
+        emit DeviceSet(account, id, untilBlock);
+    }
+
+    function deviceText(address account, bytes32 id, uint64 untilBlock) public view returns (bytes memory) {
+        return abi.encodePacked(
+            "Coffer device v1\nAccount: ",
+            bech32(account),
+            "\nDevice key: ",
+            _hex(abi.encodePacked(id)),
+            "\nValid until block: ",
+            _dec(untilBlock),
+            "\nSign this only on ",
+            site,
+            "."
+        );
+    }
+
+    /// Record an open. Refused unless the reader is on the file's current list and
+    /// the request carries the reader's signature, or an approved device's.
+    /// `deviceKey` is empty when the reader's own account key signed.
+    function open(OpenRequest calldata r, bytes calldata deviceKey, bytes calldata sig, bytes calldata release) external {
+        Head memory h = heads[r.file];
+        if (h.owner == address(0)) revert NoHead();
+        if (memberAt[r.file][r.reader] != h.epoch) revert NotReader(r.reader);
+        if (r.epoch == 0 || r.epoch > h.epoch) revert BadEpoch();
+        if (usedNonce[r.reader][r.nonce]) revert UsedNonce();
+        if (release.length == 0 || release.length > MAX_RELEASE) revert BadRelease();
+        bytes memory text = openText(r);
+        bytes32 device;
+        if (deviceKey.length == 0) {
+            _verify(r.reader, text, sig);
+        } else {
+            if (deviceKey.length != ML_DSA_87_PUBLIC_KEY_LENGTH) revert BadDevice();
+            device = keccak256(deviceKey);
+            if (devices[r.reader][device] < block.number) revert DeviceNotApproved();
+            _verifyWith(deviceKey, text, sig);
+        }
+        usedNonce[r.reader][r.nonce] = true;
+        _opens[r.file].push(OpenRecord(r.reader, r.epoch, uint64(block.number)));
+        emit Opened(r.file, r.reader, r.epoch, r.nonce, device, release);
+    }
+
+    /// Every open of a file, oldest first: the access log.
+    function opensOf(bytes16 file) external view returns (OpenRecord[] memory) {
+        return _opens[file];
+    }
+
+    function openText(OpenRequest calldata r) public view returns (bytes memory) {
+        return abi.encodePacked(
+            "Coffer open v1\nFile: ",
+            _hex(abi.encodePacked(r.file)),
+            "\nEpoch: ",
+            _dec(r.epoch),
+            "\nReader: ",
+            bech32(r.reader),
+            "\nNonce: ",
+            _dec(r.nonce),
+            "\nSign this only on ",
+            site,
+            "."
+        );
+    }
+
     // ---- signatures ----------------------------------------------------------
 
     /// The account's registered ML-DSA-87 key, only if its possession was proven.
@@ -231,9 +352,13 @@ contract Coffer {
 
     /// QoreSign message signing v1: ML-DSA-87 over "qorechain-msg-v1|" + chainId + "|" + text.
     function _verify(address account, bytes memory text, bytes calldata pqSig) internal view {
+        _verifyWith(provenKey(account), text, pqSig);
+    }
+
+    function _verifyWith(bytes memory key, bytes memory text, bytes calldata pqSig) internal view {
         bytes memory signed = abi.encodePacked("qorechain-msg-v1|", chainId, "|", text);
         (bool ok, bytes memory ret) =
-            VERIFY.staticcall(abi.encodeWithSignature("pqcVerify(bytes,bytes,bytes)", provenKey(account), pqSig, signed));
+            VERIFY.staticcall(abi.encodeWithSignature("pqcVerify(bytes,bytes,bytes)", key, pqSig, signed));
         if (!ok || ret.length < 32) revert PrecompileInactive();
         if (!abi.decode(ret, (bool))) revert BadSignature();
     }
