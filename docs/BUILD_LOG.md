@@ -52,3 +52,24 @@ Fixed on the way: file ids are now random and signed (an id derived from owner a
 **Web.** Connect QoreX or use this browser (no recovery phrase shown); share by wallet address; Shared with you read from the chain; invites tied to the invited address; the owner sees "ready, add them" when an invitee signs. The browser journey passed on the live site (16 of 16 and 8 of 8 checks).
 
 **Costs, measured:** a card about 589,500 gas (about 0.06 QOR); a change with one reader 759,521 to 1,126,453 gas (0.08 to 0.11 QOR) at 101 gwei, paid by the Coffer server.
+
+## 22 Nov 2026, evening: every open is a request the chain answers
+
+**Why.** A judge pass showed the top entries pair encryption with a second mechanism. Coffer's: the weakness of every secrets tool is that whoever holds a copy and the key opens it forever.
+
+**Format 3 and contract v4** (`0xeafe164a3f52ee096c27ba9e5ac05c0d621aa3fe`, tx `0xf2259a010acd90b6cde731a655a8c406896fe831e2a33793f8adb2ab2f679e1d`). Contents need the reader's epoch key and a release piece sealed only to the file's keeper. An open is a request signed by the reader (or a device key its wallet approved for up to 200,000 blocks); `open()` refuses it unless `memberAt[file][reader]` equals the head's epoch, marks the nonce used, stores the open (`opensOf`) and emits the release piece sealed to the reader. 25 Foundry tests, 44 unit tests.
+
+**On the live site, two people on the CLI:**
+
+| Step | Result | Tx |
+|---|---|---|
+| Owner seals to the teammate (epoch 1) | recorded | `0x281deab4388ab5ca090c64a0dfc96e5b236282040b47ccfac4a851bcf34e6655` |
+| Teammate opens (inbox, pull, run) | QoreChain checked the list, recorded the open, released the piece | `0x36ff8751db6d0cfc0bc918c0b378124c079983e3f10b614a104addd91025bb0a` |
+| Owner removes the teammate (epoch 2) | recorded | `0x09d615f31929f4b8869caeb564acd4d4c216b0f2d00713ce951c322058cb06ab` |
+| Stolen laptop: old copy, teammate's key, `--offline` | refused by the contract (NotReader) | |
+| `coffer status` | access log: one open, that teammate, epoch 1 | |
+
+**Web, on the live site (15 of 15 checks):** a QoreX teammate approves the browser once, opens through QoreChain, and later opens make no popup; the owner sees each open under "Who opened it"; after removal even the kept copy is refused; Ada's panel ends with her stolen laptop refused.
+
+**Costs:** an open 425,463 gas (about 0.04 QOR); a change 830,095 to 1,200,320 gas (0.08 to 0.12 QOR); paid by the Coffer server.
+

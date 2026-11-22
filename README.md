@@ -27,7 +27,7 @@
 |---|---|
 | Live site | https://coffer.jdollar.site |
 | The app (QoreX, or no wallet at all) | https://coffer.jdollar.site/app |
-| The Coffer contract (testnet) | `0x598d87f328739a6155486b41e4d191ff9e7f7d24` on `qorechain-diana` ([deploy tx](https://dashboard.qorechain.io/explorer/tx/0x57f8124d215e7b15659e917eae82192209982e1a8ce430d8197e64b97a890a68), [source](contracts/src/Coffer.sol)) |
+| The Coffer contract (testnet) | `0xeafe164a3f52ee096c27ba9e5ac05c0d621aa3fe` on `qorechain-diana` ([deploy tx](https://dashboard.qorechain.io/explorer/tx/0xf2259a010acd90b6cde731a655a8c406896fe831e2a33793f8adb2ab2f679e1d), [source](contracts/src/Coffer.sol)) |
 | Proof of the testnet runs | https://coffer.jdollar.site/proof and [docs/BUILD_LOG.md](docs/BUILD_LOG.md) |
 | Product spec | [docs/PRD.md](docs/PRD.md) |
 
@@ -94,17 +94,17 @@ npx github:jenzylove/coffer pull <id>            # save the latest copy of a sha
 
 The CLI keeps its key in `~/.coffer/identity`. On a server or in CI, set `COFFER_IDENTITY` instead.
 
-A run on testnet, 22 Nov 2026: two people on the CLI, nothing copied between them.
+A run on the live site, 22 Nov 2026: two people on the CLI, nothing copied between them.
 
 | Step | Result |
 |---|---|
-| Contract deployed | `0x57f8124d215e7b15659e917eae82192209982e1a8ce430d8197e64b97a890a68` |
-| Demo teammate's card | `0x206b033d100c156f0ce60d5c4de3ae425c832d9da1b235cd04db35945043cbcb` |
-| Owner seals a .env to the teammate (epoch 1); the sealed file goes on chain with it | `0xe79f5978f3dd39c85ada09ecd5a61b2ac5ddde18b463cede6e0875f3a67fca7b` |
-| Teammate runs `coffer inbox`, then `coffer pull` and `coffer run` | the file is listed under their address; their app gets the values |
-| Owner removes the teammate (epoch 2) | `0xecce0e1de5e982a1a44bc6a2720ef9eff9d244e04a91b6f38b35cc713307e9c4` |
-| Teammate's inbox | "you were removed"; the new version does not open for them |
-| An epoch 1 copy sent back to the demo teammate | refused: QoreChain has a newer one |
+| Contract deployed | `0xf2259a010acd90b6cde731a655a8c406896fe831e2a33793f8adb2ab2f679e1d` |
+| The keeper's card | `0xf82aac2cf76d1148babbd1e35c7fc1357481a702688226d3a7263feaba3f257d` |
+| Owner seals a .env to the teammate (epoch 1); the sealed file goes on chain with it | `0x281deab4388ab5ca090c64a0dfc96e5b236282040b47ccfac4a851bcf34e6655` |
+| Teammate: `coffer inbox`, `coffer pull`, `coffer run`; QoreChain checks they are on the list, records the open and releases the second key piece | `0x36ff8751db6d0cfc0bc918c0b378124c079983e3f10b614a104addd91025bb0a` |
+| Owner removes the teammate (epoch 2) | `0x09d615f31929f4b8869caeb564acd4d4c216b0f2d00713ce951c322058cb06ab` |
+| **A stolen laptop:** the teammate's old copy, their key, and `--offline` (no checks of Coffer's own) | refused by QoreChain: "not on this file's list any more" |
+| Owner's `coffer status` | the access log: one open, by that teammate, at epoch 1 |
 
 Open any hash on the [dashboard explorer](https://dashboard.qorechain.io/explorer) with the network set to Testnet.
 
@@ -152,8 +152,8 @@ On 17 Nov 2026 GitHub code search returned **2,284** public files containing `DO
 ## Develop
 
 ```bash
-npm install && npm test                    # 40 unit tests, no network
-cd contracts && forge install foundry-rs/forge-std --no-git && forge test   # 17 contract tests
+npm install && npm test                    # 44 unit tests, no network
+cd contracts && forge install foundry-rs/forge-std --no-git && forge test   # 25 contract tests
 node contracts/script/vectors.ts           # regenerate the byte for byte test vectors from the TypeScript code
 cd web && npm install && npm run dev
 RELAYER_MNEMONIC=... TEAMMATE_MNEMONIC=... POSTER_MNEMONIC=... node server/index.ts

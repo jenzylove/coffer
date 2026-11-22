@@ -9,17 +9,19 @@ import { work } from "../lib/crypto.ts";
 interface Stats { relayer: { address: string; uqor: number | string }; drips24h: number; teammate: string | { address: string } }
 
 const RUN: { step: string; result: string; tx?: string }[] = [
-  { step: "Ada, the demo teammate, publishes her card", result: "The contract checked her ML-DSA-87 signature and kept it", tx: "0x206b033d100c156f0ce60d5c4de3ae425c832d9da1b235cd04db35945043cbcb" },
-  { step: "The owner seals a .env to a teammate (epoch 1)", result: "The sealed file goes on chain with the change", tx: "0xe79f5978f3dd39c85ada09ecd5a61b2ac5ddde18b463cede6e0875f3a67fca7b" },
-  { step: "The teammate looks under their own address", result: "The file is listed; their app opens it. Nothing was sent to them" },
-  { step: "The owner removes the teammate (epoch 2)", result: "Their list says \"you were removed\"", tx: "0xecce0e1de5e982a1a44bc6a2720ef9eff9d244e04a91b6f38b35cc713307e9c4" },
-  { step: "The epoch 1 copy is sent back to Ada", result: "Refused: QoreChain has a newer one" },
+  { step: "The owner seals a .env to a teammate (epoch 1)", result: "Recorded; the file is listed under the teammate's address", tx: "0x281deab4388ab5ca090c64a0dfc96e5b236282040b47ccfac4a851bcf34e6655" },
+  { step: "The teammate opens it", result: "QoreChain checked they are on the list, recorded the open and released the second key piece", tx: "0x36ff8751db6d0cfc0bc918c0b378124c079983e3f10b614a104addd91025bb0a" },
+  { step: "The owner removes the teammate (epoch 2)", result: "Recorded", tx: "0x09d615f31929f4b8869caeb564acd4d4c216b0f2d00713ce951c322058cb06ab" },
+  { step: "A stolen laptop: the teammate's old copy and key, no checks of Coffer's own", result: "Refused by QoreChain: not on this file's list any more" },
+  { step: "The owner's access log", result: "One open: that teammate, epoch 1" },
   { step: "A card from a wallet whose key has no proof of possession", result: "Refused by the contract" },
   { step: "A card with someone else's key swapped in", result: "Refused by the contract: the signature does not match" },
 ];
 
 const SETUP: { who: string; tx: string }[] = [
-  { who: "Coffer contract deployed", tx: "0x57f8124d215e7b15659e917eae82192209982e1a8ce430d8197e64b97a890a68" },
+  { who: "Coffer contract deployed", tx: "0xf2259a010acd90b6cde731a655a8c406896fe831e2a33793f8adb2ab2f679e1d" },
+  { who: "The keeper's card", tx: "0xf82aac2cf76d1148babbd1e35c7fc1357481a702688226d3a7263feaba3f257d" },
+  { who: "Ada's card", tx: "0x975f10da218ce04f2f37c3f5643a16f1ae3f25787d96b3ea2a9431997b885472" },
 ]
 
 // EVM transactions (0x…) open on the dashboard explorer; native ones on the public REST node.
@@ -131,7 +133,7 @@ export default function Proof() {
           <Contract />
           <p className="muted">Each teammate's card and each file's latest change live here. The contract checks every signature with QoreChain's own ML-DSA-87 check, keeps the newest card per account, and only lets a file's record move forward.</p>
         </Row>
-        <Row n="03" title="A team on testnet, start to finish" tag="recorded 22 Nov 2026, real CLI">
+        <Row n="03" title="A team on testnet, start to finish" tag="recorded 22 Nov 2026 on the live site, real CLI">
           <ol className="prun">
             {RUN.map((r) => (
               <li key={r.step}>
@@ -154,11 +156,12 @@ export default function Proof() {
         <Row n="04" title="Sizes and costs" tag="measured 22 Nov 2026">
           <dl className="facts facts-big">
             <div><dt>A card, once per person</dt><dd className="mono">about 0.06 QOR</dd></div>
-            <div><dt>Each seal, share or remove</dt><dd className="mono">0.08 to 0.11 QOR</dd></div>
+            <div><dt>Each seal, share or remove</dt><dd className="mono">0.08 to 0.12 QOR</dd></div>
+            <div><dt>Each open by a teammate</dt><dd className="mono">about 0.04 QOR</dd></div>
             <div><dt>Key envelope, per reader</dt><dd className="mono">about 1.6 KB</dd></div>
             <div><dt>Overhead on the data</dt><dd className="mono">about 100 bytes</dd></div>
           </dl>
-          <p className="muted">Measured on the transactions above: a card is about 589,500 gas, and a change with one reader 759,521 to 1,126,453 gas, at 101 gwei on the testnet EVM, because the whole sealed file travels with each change (about 17 KB with one reader, about 5.3 KB more per reader; up to 10 people per file). The Coffer server pays both, so a QoreX user pays nothing.</p>
+          <p className="muted">Measured on the transactions above, at 101 gwei on the testnet EVM: a card is about 589,500 gas; a change with one reader 830,095 to 1,200,320 gas, because the whole sealed file travels with it (about 19 KB with one reader, about 5.3 KB more per reader; up to 9 people per file); an open 425,463 gas, mostly the ML-DSA-87 check of the request. The Coffer server pays all of it, so a QoreX user pays nothing.</p>
         </Row>
         <Row n="05" title="The Coffer server, right now" tag="live">
           <Live />
