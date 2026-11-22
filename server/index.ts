@@ -38,9 +38,10 @@ const deployment = existsSync(DEPLOYMENT) ? JSON.parse(readFileSync(DEPLOYMENT, 
 const CONTRACT = (process.env.COFFER_CONTRACT ?? deployment.coffer) as Hex | undefined;
 const evmNet: EvmNetwork = { chainId: net.chainId, rest: net.rest, evm: POSTER_NET.evm, coffer: CONTRACT ?? "0x0000000000000000000000000000000000000000" };
 const poster = process.env.POSTER_MNEMONIC ? await Poster.from(process.env.POSTER_MNEMONIC, CONTRACT) : null;
-const CARDS_PER_IP_DAY = 12;
-const HEADS_PER_IP_DAY = 120;
-const POSTS_GLOBAL_DAY = 1500;
+const CARDS_PER_IP_DAY = 5;
+const HEADS_PER_IP_DAY = 25;
+const POSTS_GLOBAL_DAY = 250; // about 25 QOR a day at most; the poster stops before it runs dry (POSTER_FLOOR)
+const POSTER_FLOOR = 2_000_000n; // 2 QOR kept back so the demo teammate and judges are never stranded
 
 // ---- helpers -------------------------------------------------------------------
 
@@ -139,6 +140,14 @@ async function teammateOpen(req: IncomingMessage, res: ServerResponse) {
 
 const posts: { at: number; ip: string; kind: "card" | "head"; key: string }[] = [];
 
+let posterChecked = { at: 0, ok: true };
+async function posterHasFunds() {
+  if (Date.now() - posterChecked.at < 60_000) return posterChecked.ok;
+  const st = await accountStatus(net, poster!.address).catch(() => null);
+  posterChecked = { at: Date.now(), ok: !st || st.uqor >= POSTER_FLOOR };
+  return posterChecked.ok;
+}
+
 function postSlot(req: IncomingMessage, kind: "card" | "head", key: string) {
   if (!poster || !CONTRACT) throw new HttpError(503, "recording on QoreChain is not set up on this server");
   const now = Date.now();
@@ -160,6 +169,7 @@ async function postCard(req: IncomingMessage, res: ServerResponse) {
   if (!card || typeof card !== "object" || typeof card.address !== "string" || typeof mlkemKey !== "string") throw new HttpError(400, "send { card, mlkemKey }");
   const release = postSlot(req, "card", card.address);
   try {
+    if (!(await posterHasFunds())) throw new HttpError(503, "the Coffer server is low on test QOR for recording; the owner tops it up from the faucet. Try again later.");
     let key: Uint8Array;
     try { key = fromBase64Url(mlkemKey); } catch { throw new HttpError(400, "mlkemKey must be base64url"); }
     const pq = await fetchPqKeys(net, [card.address]);
@@ -191,6 +201,7 @@ async function postHead(req: IncomingMessage, res: ServerResponse) {
   }
   const release = postSlot(req, "head", f.id);
   try {
+    if (!(await posterHasFunds())) throw new HttpError(503, "the Coffer server is low on test QOR for recording; the owner tops it up from the faucet. Try again later.");
     const h = headCall(f);
     const t = await poster!.call(h.functionName, h.args);
     send(res, 200, { hash: t.hash, block: t.block, contract: CONTRACT });

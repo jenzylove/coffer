@@ -199,9 +199,24 @@ async function build(
   const data = sealBatch({ epochKey: mgr.currentKey, context: context(base), batchIndex: version, data: plaintext }).blob;
   const access = accessHash(head);
   const dh = dataHash(data);
+  // The contract takes a sealed file of at most 64 KB. Check before the owner signs anything,
+  // with a stand-in signature of the real size, so nobody approves a change that cannot be recorded.
+  const size = enc.encode(formatCoffer({ ...head, change: { version, data: dh, sig: SIZE_PROBE_SIG }, version, writer: base.owner, data })).length;
+  if (size > MAX_SEALED_FILE) {
+    throw new CofferError("TOO_MANY_READERS", `a sealed file holds about ${MAX_READERS_HINT} people; this one would be ${Math.ceil(size / 1024)} KB with ${head.readers.length}. Split the readers across two files.`);
+  }
   const sig = await owner.sign(base.chainId, enc.encode(changeText({ id: base.id, epoch: head.epoch, version, access, data: dh, name: base.name, readers: head.readers })));
   return { ...head, change: { version, data: dh, sig }, version, writer: base.owner, data };
 }
+
+/** Coffer.sol's MAX_FILE, less a margin for a slightly longer signature encoding. */
+export const MAX_SEALED_FILE = 65_536 - 256;
+const MAX_READERS_HINT = 10;
+const SIZE_PROBE_SIG: MessageSignature = {
+  signatureType: "ml-dsa-87-hybrid",
+  classical: { keyType: "eth_secp256k1", publicKey: "A".repeat(44), signature: "A".repeat(88) },
+  pq: { algorithmId: 1, signature: "A".repeat(6172) }, // 4,627 byte ML-DSA-87 signature, base64
+};
 
 /** A new sealed file. The owner is the first reader; more readers can be passed at once. */
 export async function createCoffer(args: {

@@ -103,6 +103,7 @@ export function explain(code: string | undefined, message: string): string {
     case "WRONG_CHAIN": return "This file is for another QoreChain network.";
     case "BAD_FORMAT": return "This isn't a Coffer file.";
     case "BAD_NAME": return "A file name must be 1 to 64 characters on one line.";
+    case "TOO_MANY_READERS": return "A sealed file holds about 10 people. Nothing was signed or changed. Split the team across two files.";
     case "BAD_ADDRESS": return "That doesn't look like a QoreChain address. It starts with qor1.";
     case "NOT_OWNER": return "Only the person who sealed this file can change who opens it.";
     case "EVM_ERROR": case "REST_ERROR": return "QoreChain can't be reached right now. Try again in a moment.";

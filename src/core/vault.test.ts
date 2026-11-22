@@ -175,3 +175,14 @@ test("a file name with a line break is refused before anything is signed", async
   await assert.rejects(createCoffer({ chainId: CHAIN, name: ".env\nCan open it: everyone", owner: counting, ownerKeys: A.sealKeys, plaintext: enc.encode(ENV) }), isCode("BAD_NAME"));
   assert.equal(signed, 0);
 });
+
+test("a file shared with too many people is refused before the owner signs", async () => {
+  let signed = 0;
+  const counting = { address: A.address, sign: async (c: string, d: Uint8Array) => { signed++; return S(A).sign(c, d); } };
+  const many = Array.from({ length: 12 }, () => identityFromMnemonic(newMnemonic()));
+  await assert.rejects(createCoffer({ chainId: CHAIN, name: ".env", owner: counting, ownerKeys: A.sealKeys, readers: many.map(reader), plaintext: enc.encode(ENV) }), isCode("TOO_MANY_READERS"));
+  assert.equal(signed, 0);
+  // ten people (owner plus nine) still fit, and the real file is under the contract's limit
+  const f = await createCoffer({ chainId: CHAIN, name: ".env", owner: counting, ownerKeys: A.sealKeys, readers: many.slice(0, 9).map(reader), plaintext: enc.encode(ENV) });
+  assert.ok(enc.encode(formatCoffer(f)).length <= 65_536, `${enc.encode(formatCoffer(f)).length} bytes`);
+});

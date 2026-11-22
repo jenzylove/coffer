@@ -33,7 +33,7 @@
 
 ## Judge fast path (one minute)
 
-1. Open **https://coffer.jdollar.site/app** and press **Connect QoreX**. QoreX asks you to sign one short text, your recipient card. No fee and no transaction from your wallet. The Coffer contract checks it with QoreChain's own ML-DSA-87 verifier and records it. No QoreX? **Use this browser** works too: the Coffer relayer pays your setup.
+1. Open **https://coffer.jdollar.site/app** and press **Connect QoreX**. QoreX asks you to sign one short text, your recipient card. No fee and no transaction from your wallet (a brand new QoreX wallet sends one transfer first: that is how QoreX registers its post-quantum key). The Coffer contract checks it with QoreChain's own ML-DSA-87 verifier and records it. No QoreX? **Use this browser** works too: the Coffer relayer pays your setup.
 2. **Seal a file**: paste any `.env`. QoreX shows you what you are signing: the file, and who can open it. You get `.env.coffer`, safe to commit, and its record on QoreChain.
 3. **Share**: paste a teammate's QoreChain wallet address, or press **Share with Ada**, a demo teammate that runs on the Coffer server.
 4. **Prove it**: ask Ada to open the file (she reports the key names, never the values). **Remove Ada**, ask again: refused. **Send Ada the old copy**: refused, because QoreChain has a newer version.
@@ -104,7 +104,9 @@ Open any hash on the [dashboard explorer](https://dashboard.qorechain.io/explore
 
 ## Why it needs QoreChain
 
-Coffer needs three things from the chain: post-quantum account keys (ML-DSA-87, registered with proof of possession), a way for a contract to verify them (the 0x0A01 precompile), and a wallet that signs with both keys (QoreX). Together they turn "a teammate's wallet address" into "keys you can seal to", and they make the chain, not Coffer, the judge of which copy of a file is current.
+QoreChain is the one chain where every account already holds a post-quantum signing key (ML-DSA-87, registered with proof of possession) and where a contract can verify that key itself (the `pqcVerify` precompile at 0x0A01). That turns wallet addresses into a post-quantum key directory with no separate key server: a QoreX wallet signs one card, the contract checks it, and anyone can seal to that address. It costs about 0.06 QOR per person (589,500 gas). On a chain that signs with ECDSA, the signature binding an encryption key to an address is itself breakable by a quantum computer, so the directory would be the weak link.
+
+The same check guards every change to a file: the contract records a change only with the owner's ML-DSA-87 signature, binds each file to its owner, and refuses an older epoch. When a copy is opened, Coffer compares it with that record and refuses an older one.
 
 ## The number
 
@@ -116,7 +118,7 @@ On 17 Nov 2026 GitHub code search returned **2,284** public files containing `DO
 |---|---|
 | Coffer contract: cards and file heads | Live on QoreChain testnet (`qorechain-diana`) |
 | Sealing, sharing, removing, signatures, old copy check | Live on testnet, in the app and the CLI |
-| QoreX connect and card signing | Live (QoreX 0.4.3 or later) |
+| QoreX connect and card signing | Live, checked with QoreX 0.4.3 on 22 Nov 2026 (older builds cannot sign messages) |
 | Relayer for accounts without QoreX; poster that pays contract gas | Live, rate limited; neither can forge a card or a change |
 | Demo teammate | Live on the Coffer server |
 | Repo scanner | Live, reads public repos through the GitHub API |
@@ -134,7 +136,7 @@ On 17 Nov 2026 GitHub code search returned **2,284** public files containing `DO
 - [QoreSeal](https://github.com/qorechain) (`@qorechain/qoreseal`): ML-KEM-1024 + X25519 envelopes, recipient cards, epoch keys, the KEM registry client
 - [QoreSign](https://github.com/qorechain) (`@qorechain/qoresign`): hybrid secp256k1 + ML-DSA-87 signing, message signatures, key registration
 - [QoreChain SDK](https://github.com/qorechain) (`@qorechain/sdk`, `@qorechain/evm`): the poster's unified account and EVM window
-- QoreX (`window.qorex.native`), and the QoreX test wallet (`@qorechain/qorex-wallet-mock`) for end to end tests
+- QoreX (`window.qorex.native`); the official QoreX test wallet (`@qorechain/qorex-wallet-mock`) drove our end to end browser runs on testnet (those scripts live outside this repo)
 - [Foundry](https://getfoundry.sh) and [viem](https://viem.sh): the contract, its tests, and EVM calls
 - [CosmJS](https://github.com/cosmos/cosmjs) and `cosmjs-types`: transaction encoding
 - [noble](https://paulmillr.com/noble/) (`@noble/hashes`, `@noble/curves`) and [scure](https://github.com/paulmillr/scure-bip39) (`@scure/bip39`): hashing, secp256k1, mnemonics
@@ -144,7 +146,7 @@ On 17 Nov 2026 GitHub code search returned **2,284** public files containing `DO
 ## Develop
 
 ```bash
-npm install && npm test                    # 39 unit tests, no network
+npm install && npm test                    # 40 unit tests, no network
 cd contracts && forge install foundry-rs/forge-std --no-git && forge test   # 17 contract tests
 node contracts/script/vectors.ts           # regenerate the byte for byte test vectors from the TypeScript code
 cd web && npm install && npm run dev

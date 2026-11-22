@@ -12,7 +12,7 @@ const FOUND = 2284, ENCRYPTED = 1716;
 const WHY: { q: string; a: string }[] = [
   { q: "Each teammate signs one card, and QoreChain checks it.", a: "A wallet like QoreX can't publish an encryption key by itself. So your teammate signs one short card that says which keys to seal to, with no fee. The Coffer contract on QoreChain checks that signature against their quantum safe key on chain and keeps their newest card. From then on you seal to them knowing only their address." },
   { q: "Every change is signed with a quantum safe key.", a: "When you share with someone or remove them, you approve one change in QoreX. It carries an ML-DSA-87 signature, and QoreChain checks it before it records anything." },
-  { q: "Every change is recorded, so old copies are refused.", a: "The Coffer contract keeps each file's latest change and only lets it move forward. Before opening, Coffer compares the file with that record. A copy from before someone was removed is refused by what the chain says, not by our app." },
+  { q: "Every change is recorded, so old copies are refused.", a: "The Coffer contract keeps each file's latest change and only lets it move forward. Before opening, Coffer compares the file with that record, so a copy from before someone was removed is refused." },
 ];
 
 const SAFETY: { q: string; a: string }[] = [

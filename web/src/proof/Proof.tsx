@@ -154,11 +154,11 @@ export default function Proof() {
         <Row n="04" title="Sizes and costs" tag="measured 22 Nov 2026">
           <dl className="facts facts-big">
             <div><dt>A card, once per person</dt><dd className="mono">about 0.06 QOR</dd></div>
-            <div><dt>Each seal, share or remove</dt><dd className="mono">0.03 to 0.04 QOR</dd></div>
+            <div><dt>Each seal, share or remove</dt><dd className="mono">0.08 to 0.11 QOR</dd></div>
             <div><dt>Key envelope, per reader</dt><dd className="mono">about 1.6 KB</dd></div>
             <div><dt>Overhead on the data</dt><dd className="mono">about 100 bytes</dd></div>
           </dl>
-          <p className="muted">A card is about 589,500 gas and a file record 290,000 to 361,000 gas, at 101 gwei on the testnet EVM; the Coffer server pays both, so a QoreX user pays nothing. Most of a card's cost is the 4,627 byte ML-DSA-87 signature and the 1,568 byte ML-KEM-1024 key the contract checks and keeps in its event.</p>
+          <p className="muted">Measured on the transactions above: a card is about 589,500 gas, and a change with one reader 759,521 to 1,126,453 gas, at 101 gwei on the testnet EVM, because the whole sealed file travels with each change (about 17 KB with one reader, about 5.3 KB more per reader; up to 10 people per file). The Coffer server pays both, so a QoreX user pays nothing.</p>
         </Row>
         <Row n="05" title="The Coffer server, right now" tag="live">
           <Live />
