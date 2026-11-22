@@ -238,6 +238,9 @@ details.raw pre { font-size: 12px; line-height: 1.7; color: var(--body); backgro
 .prog-line { margin: 10px 0 0; font-size: 14px; color: var(--ink); }
 .problem { margin-top: 18px; padding-left: 12px; border-left: 2px solid var(--red); }
 .problem > p { margin: 0; }
+.problem p, .calm p, details.steps p, .result { overflow-wrap: anywhere; }
+.calm { margin-top: 18px; padding-left: 12px; border-left: 2px solid var(--ink); }
+.calm > p { margin: 0; color: var(--body); }
 .invite { display: grid; gap: 14px; justify-items: start; max-width: 640px; }
 .invite b { font-weight: 600; }
 .next .link { font-size: inherit; }
@@ -247,6 +250,7 @@ details.raw pre { font-size: 12px; line-height: 1.7; color: var(--body); backgro
 .chip { font-size: 13px; padding: 3px 8px; border: 1px solid var(--rule); background: var(--paper); }
 .addr-short { display: inline-flex; align-items: baseline; gap: 10px; }
 .addr-v { font-family: var(--mono); font-size: 14px; color: var(--ink); }
+.addr-box { margin: 0; padding: 14px; border: 1px dashed var(--dash); background: var(--paper); font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; max-width: 640px; }
 .phrase { margin: 12px 0 0; padding: 14px; border: 1px dashed var(--dash); background: var(--paper); line-height: 2; word-spacing: 0.3em; font-size: 13px; }
 .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); margin: 0; border-top: 1px solid var(--rule); }
 .facts > div { padding: 10px 14px 10px 0; border-bottom: 1px solid var(--rule); }
@@ -266,6 +270,10 @@ details.raw pre { font-size: 12px; line-height: 1.7; color: var(--body); backgro
 .dash-main { padding-left: 52px; min-width: 0; }
 .keys { padding-bottom: 28px; margin-bottom: 28px; border-bottom: 1px solid var(--rule); }
 .keys .result { font-size: 15px; }
+.keys-ready { margin-top: 12px; }
+.actions + .muted { margin-top: 16px; }
+.acts-tight { margin-top: 0; }
+.to-waiting .to-name { font-weight: 500; color: var(--body); }
 .files { display: grid; }
 .file-row { display: grid; gap: 2px; text-align: left; padding: 14px 0; border-bottom: 1px solid var(--rule); color: var(--body); }
 .files > .label + .file-row, .files > .label + p + .file-row { border-top: 1px solid var(--rule); }
@@ -376,6 +384,8 @@ details.raw pre { font-size: 12px; line-height: 1.7; color: var(--body); backgro
   .dash { grid-template-columns: 1fr; padding-top: 8px; }
   .dash-left { padding-right: 0; border-right: 0; border-bottom: 1px solid var(--rule); padding-bottom: 28px; margin-bottom: 36px; }
   .dash-main { padding-left: 0; }
+  .dash-invited .dash-main { order: -1; }
+  .dash-invited .dash-left { border-bottom: 0; margin: 48px 0 0; padding-top: 36px; border-top: 1px solid var(--rule); }
   .doc-values { padding-right: 0; padding-top: 34px; }
   .sheet-file .sheet-stamp { top: 44px; }
   .to-list li, .people li { grid-template-columns: 1fr auto; gap: 4px 14px; }

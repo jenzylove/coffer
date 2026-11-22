@@ -21,8 +21,10 @@ const ops: Record<string, (a: any) => unknown> = {
   },
   heroSeal({ both }: { both: boolean }) {
     const h = hero!;
-    const recipients = [{ mlkemPublicKey: h.reader.mlkemPublicKey }, ...(both ? [{ mlkemPublicKey: h.removed.mlkemPublicKey }] : [])];
-    h.env = seal({ ...HERO, mode: "mlkem", plaintext: h.plain, recipients });
+    const to = (k: SealKeyPair) => ({ mlkemPublicKey: k.mlkemPublicKey, x25519PublicKey: k.x25519PublicKey });
+    // QoreSeal's default hybrid mode: ML-KEM-1024 + X25519 to each reader, as the app seals
+    const recipients = [to(h.reader), ...(both ? [to(h.removed)] : [])];
+    h.env = seal({ ...HERO, plaintext: h.plain, recipients });
     return { cipher: chunks(h.env), bytes: h.env.length };
   },
   /** What Ada reads: the real decrypted lines, NAME=value. */

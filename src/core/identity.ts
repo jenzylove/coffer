@@ -2,14 +2,15 @@
 // account key (address), its ML-DSA-87 key (signatures), and the QoreSeal
 // ML-KEM-1024 + X25519 seal keys (opening files). Pure.
 import { addressFromPublicKey, deriveCanonicalPqKey, deriveClassicalKey } from "@qorechain/qoresign";
-import type { PqKeyPair } from "@qorechain/qoresign";
+import type { ClassicalKey, PqKeyPair } from "@qorechain/qoresign";
 import { deriveSealKeys } from "@qorechain/qoreseal";
 import type { SealKeyPair } from "@qorechain/qoreseal";
 import { generateMnemonic, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
-import type { Signer } from "./vault.ts";
 
-export interface Identity extends Signer {
+export interface Identity {
+  address: string;
+  classicalKey: ClassicalKey;
   pqKey: PqKeyPair;
   sealKeys: SealKeyPair;
 }

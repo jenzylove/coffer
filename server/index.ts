@@ -6,11 +6,17 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFile, stat } from "node:fs/promises";
 import { join, extname, normalize, basename } from "node:path";
 import { MsgSend } from "cosmjs-types/cosmos/bank/v1beta1/tx";
+import { existsSync, readFileSync } from "node:fs";
+import type { Hex } from "viem";
+import { fromBase64Url } from "@qorechain/qoreseal";
 import { identityFromMnemonic } from "../src/core/identity.ts";
-import { parseCoffer, verifyCoffer, openCoffer, CofferError } from "../src/core/vault.ts";
+import { parseCoffer, verifyCoffer, openCoffer, checkHead, localSigner, CofferError } from "../src/core/vault.ts";
+import { signCard, readerFromCard, type RecipientCard } from "../src/core/card.ts";
 import { parseDotenv } from "../src/core/dotenv.ts";
 import { scanDotenvx } from "../src/core/dotenvx.ts";
-import { TESTNET, MIN_UQOR, accountStatus, fetchPqKeys, latestEpoch, registerIdentity, sendTx, ChainError } from "../src/chain/qore.ts";
+import { TESTNET, MIN_UQOR, accountStatus, fetchPqKeys, registerIdentity, sendTx, ChainError } from "../src/chain/qore.ts";
+import { cardCall, headCall, readCard, readHead, type EvmNetwork } from "../src/chain/coffer.ts";
+import { Poster, PosterError, POSTER_NET } from "./poster.ts";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const net = TESTNET;
@@ -27,6 +33,14 @@ const need = (k: string) => {
 };
 const relayer = identityFromMnemonic(need("RELAYER_MNEMONIC"));
 const teammate = identityFromMnemonic(need("TEAMMATE_MNEMONIC"));
+const DEPLOYMENT = join(import.meta.dirname, "..", "deployments", "testnet.json");
+const deployment = existsSync(DEPLOYMENT) ? JSON.parse(readFileSync(DEPLOYMENT, "utf8")) : {};
+const CONTRACT = (process.env.COFFER_CONTRACT ?? deployment.coffer) as Hex | undefined;
+const evmNet: EvmNetwork = { chainId: net.chainId, rest: net.rest, evm: POSTER_NET.evm, coffer: CONTRACT ?? "0x0000000000000000000000000000000000000000" };
+const poster = process.env.POSTER_MNEMONIC ? await Poster.from(process.env.POSTER_MNEMONIC, CONTRACT) : null;
+const CARDS_PER_IP_DAY = 12;
+const HEADS_PER_IP_DAY = 120;
+const POSTS_GLOBAL_DAY = 1500;
 
 // ---- helpers -------------------------------------------------------------------
 
@@ -112,15 +126,90 @@ async function teammateOpen(req: IncomingMessage, res: ServerResponse) {
     const f = parseCoffer(file);
     if (f.chainId !== net.chainId) throw new CofferError("WRONG_CHAIN", `this file is for ${f.chainId}`);
     verifyCoffer(f, await fetchPqKeys(net, [f.owner, f.writer]));
-    const top = await latestEpoch(net, f.owner, f.id);
-    if (f.epoch < top) throw new CofferError("ROLLBACK", `this is epoch ${f.epoch}, but the owner announced epoch ${top} on chain: an old copy`);
-    if (f.epoch > top) throw new CofferError("UNRECORDED", `this is epoch ${f.epoch}, but the owner's latest record on chain is ${top === 0n ? "missing" : `epoch ${top}`}`);
+    checkHead(f, await readHead(evmNet, f.id));
     const keys = parseDotenv(new TextDecoder().decode(openCoffer(f, teammate.sealKeys))).map((e) => e.key);
     send(res, 200, { opened: true, keys, epoch: f.epoch, version: f.version, verified: true });
   } catch (e) {
     if (e instanceof CofferError || e instanceof ChainError) return send(res, 200, { opened: false, code: e.code, error: e.message });
     throw e;
   }
+}
+
+// ---- cards and heads (the poster pays; signatures decide) -------------------------
+
+const posts: { at: number; ip: string; kind: "card" | "head"; key: string }[] = [];
+
+function postSlot(req: IncomingMessage, kind: "card" | "head", key: string) {
+  if (!poster || !CONTRACT) throw new HttpError(503, "recording on QoreChain is not set up on this server");
+  const now = Date.now();
+  while (posts.length && now - posts[0]!.at > DAY) posts.shift();
+  const ip = clientIp(req);
+  const mine = posts.filter((p) => p.ip === ip && p.kind === kind).length;
+  if (kind === "card" && mine >= CARDS_PER_IP_DAY) throw new HttpError(429, `limit reached: ${CARDS_PER_IP_DAY} cards per day from one network`);
+  if (kind === "head" && mine >= HEADS_PER_IP_DAY) throw new HttpError(429, `limit reached: ${HEADS_PER_IP_DAY} changes per day from one network`);
+  if (posts.length >= POSTS_GLOBAL_DAY) throw new HttpError(429, "today's budget for recording on QoreChain is used up; try tomorrow");
+  // Reserve before any await so parallel requests cannot pass the checks twice.
+  const slot = { at: now, ip, kind, key };
+  posts.push(slot);
+  return () => { const i = posts.indexOf(slot); if (i >= 0) posts.splice(i, 1); };
+}
+
+/** Publish a signed recipient card. Checked here first, then again by the contract on chain. */
+async function postCard(req: IncomingMessage, res: ServerResponse) {
+  const { card, mlkemKey } = await readBody(req, 64 * 1024);
+  if (!card || typeof card !== "object" || typeof card.address !== "string" || typeof mlkemKey !== "string") throw new HttpError(400, "send { card, mlkemKey }");
+  const release = postSlot(req, "card", card.address);
+  try {
+    let key: Uint8Array;
+    try { key = fromBase64Url(mlkemKey); } catch { throw new HttpError(400, "mlkemKey must be base64url"); }
+    const pq = await fetchPqKeys(net, [card.address]);
+    if (!pq[card.address]) throw new HttpError(400, `${card.address} has no ML-DSA-87 key on QoreChain yet: send one transaction from that wallet first`);
+    try { readerFromCard({ card: card as RecipientCard, chainId: net.chainId, address: card.address, pqPublicKey: pq[card.address]!, mlkemPublicKey: key }); }
+    catch (e) { throw new HttpError(400, `the card does not check out: ${(e as Error).message}`); }
+    const c = cardCall(card as RecipientCard, key);
+    const t = await poster!.call(c.functionName, c.args);
+    send(res, 200, { hash: t.hash, block: t.block, contract: CONTRACT });
+  } catch (e) {
+    release();
+    if (e instanceof PosterError) throw new HttpError(e.status, e.message);
+    throw e;
+  }
+}
+
+/** Record the owner's signed change of a file. Checked here first, then again by the contract on chain. */
+async function postHead(req: IncomingMessage, res: ServerResponse) {
+  const { file } = await readBody(req);
+  if (typeof file !== "string") throw new HttpError(400, "send { file: <.env.coffer text> }");
+  let f;
+  try {
+    f = parseCoffer(file);
+    if (f.chainId !== net.chainId) throw new CofferError("WRONG_CHAIN", `this file is for ${f.chainId}`);
+    verifyCoffer(f, await fetchPqKeys(net, [f.owner, f.writer]));
+  } catch (e) {
+    if (e instanceof CofferError) throw new HttpError(400, e.message);
+    throw e;
+  }
+  const release = postSlot(req, "head", f.id);
+  try {
+    const h = headCall(f);
+    const t = await poster!.call(h.functionName, h.args);
+    send(res, 200, { hash: t.hash, block: t.block, contract: CONTRACT });
+  } catch (e) {
+    release();
+    if (e instanceof PosterError) throw new HttpError(e.status, e.message);
+    throw e;
+  }
+}
+
+// ---- EVM read proxy (the EVM RPC sends no CORS headers) ------------------------------
+
+const EVM_READS = new Set(["eth_call", "eth_getLogs", "eth_blockNumber", "eth_chainId", "eth_getTransactionReceipt"]);
+async function evmProxy(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req, 64 * 1024);
+  if (!body || typeof body.method !== "string" || !EVM_READS.has(body.method)) throw new HttpError(400, "only read calls are allowed");
+  const r = await fetch(POSTER_NET.evm, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: body.id ?? 1, method: body.method, params: body.params ?? [] }) });
+  res.writeHead(r.status, { "content-type": "application/json", "cache-control": "no-store" });
+  res.end(Buffer.from(await r.arrayBuffer()));
 }
 
 // ---- scanner -------------------------------------------------------------------------
@@ -231,10 +320,18 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/api/drip" && req.method === "POST") return await drip(req, res);
     if (url.pathname === "/api/scan" && req.method === "GET") return await scan(req, res, url);
     if (url.pathname === "/api/teammate" && req.method === "GET") return send(res, 200, { address: teammate.address });
+    if (url.pathname === "/api/card" && req.method === "POST") return await postCard(req, res);
+    if (url.pathname === "/api/head" && req.method === "POST") return await postHead(req, res);
+    if (url.pathname === "/api/config" && req.method === "GET") return send(res, 200, { chainId: net.chainId, contract: CONTRACT ?? null, poster: poster?.address ?? null, teammate: teammate.address });
+    if (url.pathname === "/evm" && req.method === "POST") return await evmProxy(req, res);
     if (url.pathname === "/api/teammate/open" && req.method === "POST") return await teammateOpen(req, res);
     if (url.pathname === "/api/stats" && req.method === "GET") {
       const rel = await accountStatus(net, relayer.address);
-      return send(res, 200, { relayer: { address: relayer.address, uqor: rel.uqor }, drips24h: drips.filter((d) => Date.now() - d.at < DAY).length, teammate: teammate.address });
+      const pos = poster ? await accountStatus(net, poster.address) : null;
+      return send(res, 200, {
+        relayer: { address: relayer.address, uqor: rel.uqor }, poster: pos ? { address: pos.address, uqor: pos.uqor } : null, contract: CONTRACT ?? null,
+        drips24h: drips.filter((d) => Date.now() - d.at < DAY).length, posts24h: posts.length, teammate: teammate.address,
+      });
     }
     if (url.pathname === "/healthz") return send(res, 200, { ok: true });
     if (url.pathname.startsWith("/rest/")) return await proxy(req, res, url);
@@ -248,21 +345,30 @@ const server = createServer(async (req, res) => {
   }
 });
 
-// The demo teammate must have published its keys before anyone can share to it.
+// The demo teammate needs its keys registered and a card on chain before anyone can share to it.
 (async () => {
   // The chain refuses transactions from accounts with no ML-DSA key, so the relayer registers first.
   await serial(() => registerIdentity(net, relayer, (s, t) => console.log(`relayer: ${s}${t ? ` ${t.hash}` : ""}`)));
   const st = await accountStatus(net, teammate.address, teammate.sealKeys.mlkemPublicKey);
-  if (st.mldsa && st.kemIsOurs) return console.log("teammate: ready");
-  if (st.uqor < 60_000n) {
-    const t = await serial(() => sendTx(net, relayer, [{
-      typeUrl: "/cosmos.bank.v1beta1.MsgSend",
-      value: MsgSend.encode(MsgSend.fromPartial({ fromAddress: relayer.address, toAddress: teammate.address, amount: [{ denom: "uqor", amount: "200000" }] })).finish(),
-    }], { memo: "coffer: fund demo teammate" }));
-    console.log(`teammate: funded ${t.hash}`);
-    for (let i = 0; i < 20 && (await accountStatus(net, teammate.address)).uqor < 60_000n; i++) await new Promise((ok) => setTimeout(ok, 1500));
+  if (!(st.mldsa && st.kemIsOurs)) {
+    if (st.uqor < 60_000n) {
+      const t = await serial(() => sendTx(net, relayer, [{
+        typeUrl: "/cosmos.bank.v1beta1.MsgSend",
+        value: MsgSend.encode(MsgSend.fromPartial({ fromAddress: relayer.address, toAddress: teammate.address, amount: [{ denom: "uqor", amount: "200000" }] })).finish(),
+      }], { memo: "coffer: fund demo teammate" }));
+      console.log(`teammate: funded ${t.hash}`);
+      for (let i = 0; i < 20 && (await accountStatus(net, teammate.address)).uqor < 60_000n; i++) await new Promise((ok) => setTimeout(ok, 1500));
+    }
+    await registerIdentity(net, teammate, (s, t) => console.log(`teammate: ${s}${t ? ` ${t.hash}` : ""}`));
   }
-  await registerIdentity(net, teammate, (s, t) => console.log(`teammate: ${s}${t ? ` ${t.hash}` : ""}`));
-})().catch((e) => console.error(`teammate setup failed: ${e.message} (fund ${teammate.address})`));
+  if (!poster || !CONTRACT) return console.log("teammate: keys ready; no contract configured, so no card");
+  await poster.ensureRegistered();
+  const have = await readCard(evmNet, teammate.address).catch(() => null);
+  if (have && have.card.x25519PublicKey === Buffer.from(teammate.sealKeys.x25519PublicKey).toString("hex")) return console.log("teammate: ready, card on chain");
+  const card = await signCard(net.chainId, localSigner(teammate), teammate.sealKeys);
+  const c = cardCall(card, teammate.sealKeys.mlkemPublicKey);
+  const t = await poster.call(c.functionName, c.args);
+  console.log(`teammate: card published ${t.hash}`);
+})().catch((e) => console.error(`teammate setup failed: ${e.message} (teammate ${teammate.address}, poster ${poster?.address})`));
 
-server.listen(PORT, () => console.log(`coffer server on :${PORT} · relayer ${relayer.address} · teammate ${teammate.address}`));
+server.listen(PORT, () => console.log(`coffer server on :${PORT} · relayer ${relayer.address} · teammate ${teammate.address} · poster ${poster?.address ?? "none"} · contract ${CONTRACT ?? "none"}`));

@@ -16,6 +16,9 @@ const proxy = {
 
   "/api": { target: process.env.COFFER_API ?? "https://coffer.jdollar.site", changeOrigin: true },
 
+  // /evm: the server's read only EVM JSON-RPC proxy (the EVM RPC sends no CORS headers either)
+  "/evm": { target: process.env.COFFER_API ?? "https://coffer.jdollar.site", changeOrigin: true },
+
 };
 
 

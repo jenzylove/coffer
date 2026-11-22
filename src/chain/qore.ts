@@ -11,7 +11,6 @@ import { fetchPqKeyStatus, simulateTx, submitWithSignBytesFallback } from "@qore
 import { buildRegisterKemKeyMessage, describeKemRegistryError } from "@qorechain/qoreseal";
 import { fetchKemKey } from "@qorechain/qoreseal/network";
 import type { Identity } from "../core/identity.ts";
-import type { Reader } from "../core/vault.ts";
 
 export interface Network { chainId: string; rest: string; explorerTx?: (hash: string) => string }
 
@@ -58,16 +57,6 @@ export async function accountStatus(net: Network, address: string, mlkemPublicKe
     kem: kem.registered,
     kemIsOurs: !!(kem.registered && kem.publicKey && mlkemPublicKey && toHex(kem.publicKey) === toHex(mlkemPublicKey)),
   };
-}
-
-/** A reader to seal to, from its address alone: the ML-KEM-1024 key comes from the chain's KEM registry. */
-export async function fetchReader(net: Network, address: string): Promise<Reader> {
-  if (!/^qor1[02-9ac-hj-np-z]{38,58}$/.test(address)) throw new ChainError("BAD_ADDRESS", `${address} is not a qor1 address`);
-  const kem = await fetchKemKey({ rest: net.rest, address });
-  if (!kem.registered || !kem.publicKey) {
-    throw new ChainError("NO_KEM_KEY", `${address} has not set up Coffer yet: no ML-KEM key on chain. Ask them to run "coffer init".`);
-  }
-  return { address, mlkemPublicKey: kem.publicKey };
 }
 
 /** ML-DSA-87 keys registered on chain, for checking file signatures. */
@@ -162,82 +151,5 @@ export async function registerIdentity(net: Network, id: Identity, onStep?: (s: 
   return out;
 }
 
-// ---- grant records ---------------------------------------------------------
-// Every share and revoke is a hybrid-signed 1 uqor self-send whose memo says
-// what changed. Anyone can list them; the owner's signature is the chain's.
-
 /** Below this an account cannot pay for one more transaction. */
 export const MIN_UQOR = 40_000n;
-
-export const MEMO_PREFIX = "coffer/1";
-const MAX_MEMO = 256;
-
-export type GrantOp = "create" | "share" | "revoke";
-export interface Grant { op: GrantOp; fileId: string; epoch: bigint; version: bigint; added: string[]; removed: string[] }
-export interface GrantRecord extends Grant { hash: string; height: number; time: string; owner: string }
-
-
-export function grantMemos(g: Grant): string[] {
-  const head = `${MEMO_PREFIX} ${g.op} ${g.fileId} e${g.epoch} v${g.version}`;
-  const parts = [...g.added.map((a) => `+${a}`), ...g.removed.map((a) => `-${a}`)];
-  const memos: string[] = [];
-  let cur = head;
-  for (const p of parts) {
-    if (cur.length + 1 + p.length > MAX_MEMO) { memos.push(cur); cur = head; }
-    cur += ` ${p}`;
-  }
-  memos.push(cur);
-  return memos;
-}
-
-export function parseGrantMemo(memo: string): Grant | null {
-  const m = memo.match(/^coffer\/1 (create|share|revoke) ([0-9a-f]{12}) e(\d+) v(\d+)((?: [+-]qor1[0-9a-z]+)*)$/);
-  if (!m) return null;
-  const parts = (m[5] ?? "").trim().split(" ").filter(Boolean);
-  return {
-    op: m[1] as GrantOp, fileId: m[2]!, epoch: BigInt(m[3]!), version: BigInt(m[4]!),
-    added: parts.filter((p) => p.startsWith("+")).map((p) => p.slice(1)),
-    removed: parts.filter((p) => p.startsWith("-")).map((p) => p.slice(1)),
-  };
-}
-
-export async function recordGrant(net: Network, owner: Identity, g: Grant): Promise<TxResult[]> {
-  const out: TxResult[] = [];
-  for (const memo of grantMemos(g)) {
-    const send = MsgSend.encode(MsgSend.fromPartial({ fromAddress: owner.address, toAddress: owner.address, amount: [{ denom: "uqor", amount: "1" }] })).finish();
-    out.push(await sendTx(net, owner, [{ typeUrl: "/cosmos.bank.v1beta1.MsgSend", value: send }], { memo }));
-  }
-  return out;
-}
-
-/** Grant records the owner put on chain, newest first, optionally for one file. */
-export async function grantHistory(net: Network, owner: string, id?: string, opts: { pageSize?: number; maxPages?: number; stopAtFirst?: boolean } = {}): Promise<GrantRecord[]> {
-  const pageSize = opts.pageSize ?? 100;
-  const maxPages = opts.maxPages ?? 20;
-  const q = encodeURIComponent(`message.sender='${owner}'`);
-  const out: GrantRecord[] = [];
-  for (let page = 1; page <= maxPages; page++) {
-    const b = await get(net, `/cosmos/tx/v1beta1/txs?query=${q}&order_by=ORDER_BY_DESC&page=${page}&limit=${pageSize}`);
-    const txs = b.tx_responses ?? [];
-    for (const t of txs) {
-      // only self-sends signed by the owner count; the memo of anything else is ignored
-      const msgs = t.tx?.body?.messages ?? [];
-      if (msgs.length !== 1 || msgs[0]["@type"] !== "/cosmos.bank.v1beta1.MsgSend" || msgs[0].from_address !== owner || msgs[0].to_address !== owner || t.code !== 0) continue;
-      const g = parseGrantMemo(t.tx.body.memo ?? "");
-      if (!g || (id && g.fileId !== id)) continue;
-      out.push({ ...g, hash: t.txhash, height: Number(t.height), time: t.timestamp, owner });
-      if (opts.stopAtFirst) return out;
-    }
-    const total = Number(b.total ?? b.pagination?.total ?? 0);
-    if (txs.length < pageSize || (total && page * pageSize >= total)) return out;
-  }
-  // Ran out of pages before reaching the start of the owner's history: refuse rather than guess.
-  if (opts.stopAtFirst && id) throw new ChainError("HISTORY_TOO_LONG", `could not find this file's record in the owner's last ${pageSize * maxPages} transactions`);
-  return out;
-}
-
-/** The epoch of the owner's newest record for a file (0 if none). Records only move forward, so the newest is the highest. */
-export async function latestEpoch(net: Network, owner: string, id: string): Promise<bigint> {
-  const h = await grantHistory(net, owner, id, { stopAtFirst: true });
-  return h[0]?.epoch ?? 0n;
-}

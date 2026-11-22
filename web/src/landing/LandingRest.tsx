@@ -10,26 +10,27 @@ import { ScanDoor } from "./ScanDoor.tsx";
 const FOUND = 2284, ENCRYPTED = 1716;
 
 const WHY: { q: string; a: string }[] = [
-  { q: "Your teammates' sealing keys are public, on chain.", a: "When a teammate opens Coffer, their public sealing key goes on QoreChain under their address. From then on you lock a file to them knowing only that address. No key swapping." },
-  { q: "Every change is signed with a quantum safe key.", a: "The owner signs who can read and the last writer signs what was written, with ML-DSA-87 keys registered on QoreChain." },
-  { q: "Every share and revoke is recorded, so old copies are refused.", a: "Before opening, Coffer reads the record. A copy restored from before a revoke is refused." },
+  { q: "Each teammate signs one card, and QoreChain checks it.", a: "A wallet like QoreX can't publish an encryption key by itself. So your teammate signs one short card that says which keys to seal to, with no fee. The Coffer contract on QoreChain checks that signature against their quantum safe key on chain and keeps their newest card. From then on you seal to them knowing only their address." },
+  { q: "Every change is signed with a quantum safe key.", a: "When you share with someone or remove them, you approve one change in QoreX. It carries an ML-DSA-87 signature, and QoreChain checks it before it records anything." },
+  { q: "Every change is recorded, so old copies are refused.", a: "The Coffer contract keeps each file's latest change and only lets it move forward. Before opening, Coffer compares the file with that record. A copy from before someone was removed is refused by what the chain says, not by our app." },
 ];
 
 const SAFETY: { q: string; a: string }[] = [
-  { q: "No server sees your values", a: "Sealing and opening happen in your terminal or this browser. The Coffer server relays to QoreChain and pays setup fees; it never receives your values. One exception: a file you share with the demo teammate is opened by that teammate on the server, which reports names only." },
+  { q: "No server sees your values", a: "Sealing and opening happen in your terminal or this browser. The Coffer server passes signed cards and changes to QoreChain and pays the gas; it can't forge either, and it never receives your values. One exception: a file you share with Ada, the demo teammate, is opened by Ada on the server, which reports names only." },
   { q: "A signature proves who, not whether you know them", a: "Anyone can make a valid Coffer file sealed to your address. The CLI remembers each file's owner the first time and refuses a copy from someone else. In the browser, check the owner shown before you use a file." },
-  { q: "Keys come from a QoreChain node", a: "Reader keys, signing keys and records are read from a QoreChain REST node, through the Coffer server in the browser. The CLI can use your own node with COFFER_REST." },
-  { q: "Your recovery phrase opens everything shared with you", a: "It is the one secret to keep, like dotenvx's .env.keys. On a server, put it in COFFER_IDENTITY. The web app keeps it in this browser until you remove it." },
-  { q: "Revoking can't take back what someone already read", a: "A removed reader can't open the new file, but may remember old values. Coffer lists every name so you can rotate them." },
+  { q: "Keys come from QoreChain", a: "Cards, signing keys and file records are read from QoreChain, through the Coffer server in the browser. The CLI can use your own node with COFFER_REST." },
+  { q: "Your key file opens everything shared with you", a: "The key that opens your files lives in this browser or your terminal. Save my key file keeps a private copy, like dotenvx's .env.keys. Keep it private and never commit it." },
+  { q: "Removing someone can't take back what they already read", a: "A removed reader can't open the new version, but may remember old values. Coffer lists every name so you can change them at the provider." },
   { q: "Testnet only, for now", a: "Coffer runs on QoreChain testnet; test QOR has no value. Mainnet waits until the key registry is exercised there end to end." },
 ];
 
 const FAQ: { q: string; a: string }[] = [
-  { q: "Is a .env.coffer file really safe in a public repo?", a: "The values are encrypted with AES 256 and the key is sealed with ML-KEM-1024 to each reader. The file shows its owner and readers' addresses; everything else, key names included, is sealed." },
+  { q: "Is a .env.coffer file really safe in a public repo?", a: "The values are encrypted with AES 256, and that key is sealed to each reader with ML-KEM-1024 and X25519 together. The file shows the addresses of its owner and readers; everything else, key names included, is sealed." },
   { q: "What does a quantum computer change?", a: "It breaks the curves most tools use today, secp256k1 included. Public repos are kept forever, so those files can be collected now and opened later. ML-KEM-1024 (FIPS 203) is built to resist that." },
-  { q: "Do my teammates need a crypto wallet?", a: "No. Coffer makes an address from a 24 word recovery phrase, in the CLI or this browser, and the relayer pays the setup." },
+  { q: "Do my teammates need a crypto wallet?", a: "QoreX is the easy way: connect it and sign once, with no fee. No QoreX? Coffer can keep a key in the browser or the CLI instead, and the Coffer relayer pays its setup." },
   { q: "How do I move from dotenvx?", a: "Run coffer import next to your .env and .env.keys, or use the app. Values are decrypted on your machine and sealed again. Rotate them when you can, since old copies stay in git history." },
-  { q: "What if I lose my recovery phrase?", a: "You can't open files shared with that address any more. Make a new one and ask the owner to share with it." },
+  { q: "What if I lose my key?", a: "Load your key file to get it back. No key file? Make a new key, and the owner seals you in again with one click." },
+  { q: "What does QoreChain refuse?", a: "A forged card. A card older than the one it already has. A change to a file signed by anyone but its owner. And any older copy of a file, once a newer change is recorded." },
 ];
 
 function Rows({ items, first = false }: { items: { q: string; a: string }[]; first?: boolean }) {
@@ -98,7 +99,7 @@ const SECTIONS: (() => ReactNode)[] = [
   () => (
     <section className="block" id="qorechain" aria-labelledby="h-why">
       <div className="wrap split">
-        <Reveal><h2 id="h-why" className="h-section">Why QoreChain.</h2><p className="lead">An address is enough, because the chain holds everyone's public keys and every record.</p></Reveal>
+        <Reveal><h2 id="h-why" className="h-section">Why QoreChain.</h2><p className="lead">An address is enough, because the chain holds everyone's card and every file's latest change.</p></Reveal>
         <Reveal as="ol" className="why">
           {WHY.map((w, i) => (
             <li key={w.q}>
@@ -131,7 +132,7 @@ const SECTIONS: (() => ReactNode)[] = [
       <div className="wrap">
         <Reveal>
           <h2 id="h-close" className="h-display closing-t">Seal your first file in a minute.</h2>
-          <p className="lead">Make an address, seal a .env, share it with our demo teammate, then take it back.</p>
+          <p className="lead">Connect QoreX, seal a .env, share it with Ada, our demo teammate, then take it back.</p>
           <div className="actions"><Link to="/app" className="btn">Open the app</Link></div>
         </Reveal>
       </div>

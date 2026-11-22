@@ -1,9 +1,10 @@
 // /proof: what is real and how to inspect it. Live numbers are read now; recorded
 // ones come from the repo's build log and spike, with their dates.
 import { useEffect, useState, type ReactNode } from "react";
-import { Page, Reveal } from "../components/Chrome.tsx";
+import { CopyButton, Page, Reveal } from "../components/Chrome.tsx";
 import { Stamp } from "../components/Doc.tsx";
 import { api, qor, short, txUrl } from "../lib/net.ts";
+import { work } from "../lib/crypto.ts";
 
 interface Stats { relayer: { address: string; uqor: number | string }; drips24h: number; teammate: string | { address: string } }
 
@@ -24,6 +25,53 @@ const SETUP: { who: string; mldsa: string; kem: string }[] = [
 
 const Tx = ({ h }: { h: string }) => <a className="mono txlink" href={txUrl(h)} target="_blank" rel="noreferrer" title={h}>{short(h, 10, 8)}</a>;
 
+interface Config { chainId: string; contract: string | null; poster: string | null; teammate: string }
+interface Facts {
+  contract: string;
+  card: { block: number; hash: string | null; issuedAt: string } | null;
+  head: { file: string; owner: string; epoch: bigint; version: bigint; block: number; hash: string; current: { epoch: bigint; version: bigint; height: number } | null } | null;
+}
+
+/** The Coffer contract, read now: its address, Ada's card, and the newest file record. */
+function Contract() {
+  const [cfg, setCfg] = useState<Config | null>(null);
+  const [f, setF] = useState<Facts | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [at, setAt] = useState<Date | null>(null);
+  useEffect(() => {
+    let live = true;
+    api<Config>("/api/config")
+      .then((c) => {
+        if (live) setCfg(c);
+        if (!c.contract) throw new Error("the contract isn't set up on this server yet");
+        return work<Facts>("proofFacts", { teammate: c.teammate });
+      })
+      .then((x) => { if (live) { setF(x); setAt(new Date()); } })
+      .catch((e) => live && setErr((e as Error).message));
+    return () => { live = false; };
+  }, []);
+  return (
+    <>
+      <p className="live-line"><Stamp className="stamp-sm">Live</Stamp><span className="muted small">{at ? `read from QoreChain at ${at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "reading"}</span></p>
+      {err ? <p className="problem-line">The contract can't be read right now: {err}</p> : !f ? <p className="muted">Reading QoreChain…</p> : (
+        <dl className="facts facts-big">
+          <div><dt>Coffer contract</dt><dd><span className="mono" title={f.contract}>{short(f.contract, 10, 8)}</span> <CopyButton text={f.contract} /></dd></div>
+          <div><dt>Ada's card</dt><dd>{f.card ? (f.card.hash ? <Tx h={f.card.hash} /> : <span className="mono">block {f.card.block}</span>) : <span className="muted">not on chain yet</span>}</dd></div>
+          <div><dt>Newest file record</dt><dd className="mono">{f.head ? `epoch ${String(f.head.epoch)} · version ${String(f.head.version)}` : "none yet"}</dd></div>
+          {f.head && <div><dt>Recorded in</dt><dd><Tx h={f.head.hash} /></dd></div>}
+        </dl>
+      )}
+      {f?.head && (
+        <details className="mini">
+          <summary>That file's record, live</summary>
+          <p>File <span className="mono">{f.head.file}</span>, owner <span className="mono">{short(f.head.owner, 8, 4)}</span>. Right now QoreChain holds {f.head.current ? <span className="mono">epoch {String(f.head.current.epoch)}, version {String(f.head.current.version)}, block {f.head.current.height}</span> : "no record"}. A copy older than that is refused.</p>
+        </details>
+      )}
+      {cfg?.teammate && <p className="muted small">Ada, the demo teammate: <span className="mono">{short(cfg.teammate, 8, 4)}</span></p>}
+    </>
+  );
+}
+
 function Live() {
   const [s, setS] = useState<Stats | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -40,7 +88,7 @@ function Live() {
           <div><dt>Relayer balance</dt><dd className="mono">{qor(BigInt(s.relayer.uqor))} test QOR</dd></div>
           <div><dt>Addresses funded, last 24 hours</dt><dd className="mono">{s.drips24h}</dd></div>
           <div><dt>Relayer</dt><dd className="mono">{short(s.relayer.address, 8, 4)}</dd></div>
-          {mate && <div><dt>Demo teammate</dt><dd className="mono">{short(mate, 8, 4)}</dd></div>}
+          {mate && <div><dt>Ada, demo teammate</dt><dd className="mono">{short(mate, 8, 4)}</dd></div>}
         </dl>
       )}
     </>
@@ -79,7 +127,11 @@ export default function Proof() {
             <p>GitHub code search on 17 November 2026. Query one: <span className="mono">DOTENV_PUBLIC_KEY</span>. Query two: <span className="mono">DOTENV_PUBLIC_KEY encrypted:</span>. Counts are approximate and cover indexed default branches only.</p>
           </details>
         </Row>
-        <Row n="02" title="A three person team on testnet" tag="recorded 17 Nov 2026, real CLI">
+        <Row n="02" title="The Coffer contract on QoreChain" tag="live">
+          <Contract />
+          <p className="muted">Each teammate's card and each file's latest change live here. The contract checks every signature with QoreChain's own ML-DSA-87 check, keeps the newest card per account, and only lets a file's record move forward.</p>
+        </Row>
+        <Row n="03" title="A three person team on testnet" tag="recorded 17 Nov 2026, real CLI">
           <ol className="prun">
             {RUN.map((r) => (
               <li key={r.step}>
@@ -98,7 +150,7 @@ export default function Proof() {
             </ol>
           </details>
         </Row>
-        <Row n="03" title="Sizes and costs" tag="measured 17 Nov 2026">
+        <Row n="04" title="Sizes and costs" tag="measured 17 Nov 2026">
           <dl className="facts facts-big">
             <div><dt>Setup per reader, once</dt><dd className="mono">0.054 QOR</dd></div>
             <div><dt>Each share or revoke record</dt><dd className="mono">about 0.017 QOR</dd></div>
@@ -107,9 +159,9 @@ export default function Proof() {
           </dl>
           <p className="muted">Setup is 278,305 gas for the ML-DSA-87 key and 247,481 gas for the ML-KEM-1024 key, at 0.1 uqor per gas. A 94 byte .env sealed to 194 bytes; the key envelope for three readers was 4,997 bytes. Sealing took 79 ms locally.</p>
         </Row>
-        <Row n="04" title="The Coffer server, right now" tag="live">
+        <Row n="05" title="The Coffer server, right now" tag="live">
           <Live />
-          <p className="muted">The server pays setup fees for new addresses and runs the demo teammate. It never receives your values: sealing and opening happen in your browser or terminal. Files shared with the demo teammate are opened by that teammate on the server, which reports names only.</p>
+          <p className="muted">The server pays the gas for cards and file records, pays setup for keys made in a browser, and runs Ada, the demo teammate. It can't forge a card or a change: the contract checks the signatures. It never receives your values: sealing and opening happen in your browser or terminal. Files shared with Ada are opened by Ada on the server, which reports names only.</p>
         </Row>
       </div>
     </Page>

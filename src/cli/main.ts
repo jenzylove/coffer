@@ -7,22 +7,44 @@ import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { identityFromMnemonic, newMnemonic, type Identity } from "../core/identity.ts";
 import {
-  createCoffer, openCoffer, shareCoffer, revokeCoffer, updateCoffer, verifyCoffer,
+  createCoffer, openCoffer, shareCoffer, revokeCoffer, updateCoffer, verifyCoffer, checkHead, localSigner,
   formatCoffer, parseCoffer, CofferError, type CofferFile,
 } from "../core/vault.ts";
+import { signCard } from "../core/card.ts";
+import { toBase64Url } from "@qorechain/qoreseal";
 import { parseDotenv, serializeDotenv, toRecord, type DotenvEntry } from "../core/dotenv.ts";
 import { importDotenvx, scanDotenvx } from "../core/dotenvx.ts";
 import {
-  TESTNET, accountStatus, fetchReader, fetchPqKeys, registerIdentity, MIN_UQOR, recordGrant, grantHistory, latestEpoch,
+  TESTNET, accountStatus, fetchPqKeys, registerIdentity, MIN_UQOR,
   ChainError, type Network, type TxResult,
 } from "../chain/qore.ts";
+import { fetchReader, readCard, readHead, type EvmNetwork } from "../chain/coffer.ts";
+import { COFFER_CONTRACT, COFFER_SERVER, EVM_TESTNET } from "../chain/deployment.ts";
+import type { Hex } from "viem";
 
 const net: Network = { ...TESTNET, rest: process.env.COFFER_REST ?? TESTNET.rest };
+const evmNet: EvmNetwork = { chainId: net.chainId, rest: net.rest, evm: process.env.COFFER_EVM ?? EVM_TESTNET, coffer: (process.env.COFFER_CONTRACT ?? COFFER_CONTRACT) as Hex };
 const HOME = process.env.COFFER_HOME ?? join(homedir(), ".coffer");
 const ID_FILE = join(HOME, "identity");
 const SEEN_FILE = join(HOME, "seen.json");
 const PINS_FILE = join(HOME, "owners.json");
-const RELAYER = process.env.COFFER_RELAYER ?? "https://coffer.jdollar.site/api/drip";
+const SERVER = (process.env.COFFER_SERVER ?? process.env.COFFER_RELAYER?.replace(/\/api\/drip$/, "") ?? COFFER_SERVER).replace(/\/$/, "");
+const RELAYER = `${SERVER}/api/drip`;
+const contractUrl = (hash: string) => `https://dashboard.qorechain.io/explorer/tx/${hash}`;
+
+/** Ask the Coffer server to submit a signed card or change to the contract (it pays the gas, it cannot forge either). */
+async function post(path: "/api/card" | "/api/head", body: unknown): Promise<{ hash: string; block: number }> {
+  const r = await fetch(`${SERVER}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
+  const b = r ? ((await r.json().catch(() => ({}))) as any) : {};
+  if (!r?.ok) throw new ChainError("NOT_RECORDED", `QoreChain did not record it${b.error ? `: ${b.error}` : r ? ` (server ${r.status})` : ": the Coffer server is not reachable"}`);
+  return b;
+}
+
+/** Record the owner's change on chain. Called before the file is written, so no unrecorded copy exists. */
+async function recordHead(f: CofferFile) {
+  const t = await post("/api/head", { file: formatCoffer(f) });
+  say(`  recorded on QoreChain: ${t.hash}  ${c.dim(contractUrl(t.hash))}`);
+}
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
@@ -137,9 +159,12 @@ async function checkFile(f: CofferFile, opts: { offline?: boolean; path?: string
   }
   const keys = await fetchPqKeys(net, [f.owner, f.writer]);
   verifyCoffer(f, keys);
-  const top = await latestEpoch(net, f.owner, f.id);
-  if (f.epoch < top) throw new CofferError("ROLLBACK", `this file is epoch ${f.epoch} but its owner announced epoch ${top} on chain: it is an old copy (someone may have restored a version a removed reader can still open)`);
-  if (f.epoch > top) throw new CofferError("UNRECORDED", `this file is epoch ${f.epoch} but its owner's latest record on chain is ${top === 0n ? "missing" : `epoch ${top}`}. Coffer records every change before writing the file, so this copy was not made by Coffer or its record failed. The owner can run "coffer record".`);
+  try {
+    checkHead(f, await readHead(evmNet, f.id));
+  } catch (e) {
+    if (e instanceof CofferError && e.code === "UNRECORDED") throw new CofferError("UNRECORDED", `${e.message}. Coffer records every change before writing the file, so this copy was not made by Coffer or its record failed. The owner can run "coffer record".`);
+    throw e;
+  }
   const s = seen()[f.id];
   if (s && (f.epoch < BigInt(s.epoch) || (f.epoch === BigInt(s.epoch) && f.version < BigInt(s.version)))) {
     throw new CofferError("ROLLBACK", `this machine already saw epoch ${s.epoch} version ${s.version} of this file; this copy is older (epoch ${f.epoch} version ${f.version})`);
@@ -150,10 +175,24 @@ function entriesOf(f: CofferFile, id: Identity): DotenvEntry[] {
   return parseDotenv(dec.decode(openCoffer(f, id.sealKeys)));
 }
 
+const hexOf = (b: Uint8Array) => Buffer.from(b).toString("hex");
+
+/** This identity's card is the current one on chain, so readers seal to keys it holds. */
+async function cardIsOurs(id: Identity) {
+  const have = await readCard(evmNet, id.address).catch(() => null);
+  return !!have && have.card.x25519PublicKey === hexOf(id.sealKeys.x25519PublicKey) && have.card.mlkemKeySha3 === hexOf(await sha3(id.sealKeys.mlkemPublicKey));
+}
+async function sha3(b: Uint8Array) {
+  const { sha3_256 } = await import("@noble/hashes/sha3.js");
+  return sha3_256(b);
+}
+
 async function ensureReady(id: Identity) {
   const st = await accountStatus(net, id.address, id.sealKeys.mlkemPublicKey);
-  if (!st.mldsa || !st.kemIsOurs) throw new CofferError("NOT_REGISTERED", `your address is not set up on QoreChain yet. Run "coffer init".`);
+  if (!st.mldsa || !(await cardIsOurs(id))) throw new CofferError("NOT_REGISTERED", `your address is not set up on QoreChain yet. Run "coffer init".`);
 }
+
+const owner = (id: Identity) => ({ signer: localSigner(id), keys: id.sealKeys });
 
 // ---- commands ----------------------------------------------------------------
 
@@ -169,7 +208,7 @@ async function init() {
   }
   let st = await accountStatus(net, id.address, id.sealKeys.mlkemPublicKey);
   const ready = st.mldsa && st.kemIsOurs;
-  if (ready && st.uqor >= MIN_UQOR) { say(c.green("ready: anyone can seal files to this address")); return; }
+  if (ready && st.uqor >= MIN_UQOR) { await publishCard(id); return; }
   if (st.uqor < (ready ? MIN_UQOR : 60_000n)) {
     say(ready ? `topping up from the Coffer relayer...` : `funding the two setup transactions from the Coffer relayer...`);
     const r = await fetch(RELAYER, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address: id.address }) }).catch(() => null);
@@ -185,14 +224,25 @@ async function init() {
   }
   const out = await registerIdentity(net, id, (s, t) => (t ? txLine(s, t) : say(c.dim(`  ${s}...`))));
   void out;
+  await publishCard(id);
+}
+
+/** Sign this identity's recipient card and have it recorded in the Coffer contract (the contract checks the signature). */
+async function publishCard(id: Identity) {
+  if (await cardIsOurs(id)) { say(c.green("ready: anyone can seal files to this address")); return; }
+  say(c.dim("  signing your recipient card (ML-KEM-1024 + X25519 keys) with ML-DSA-87..."));
+  const card = await signCard(net.chainId, localSigner(id), id.sealKeys);
+  const t = await post("/api/card", { card, mlkemKey: toBase64Url(id.sealKeys.mlkemPublicKey) });
+  say(`  card recorded on QoreChain: ${t.hash}  ${c.dim(contractUrl(t.hash))}`);
   say(c.green("ready: anyone can seal files to this address"));
 }
 
 async function whoami() {
   const id = loadIdentity();
   const st = await accountStatus(net, id.address, id.sealKeys.mlkemPublicKey);
+  const card = await cardIsOurs(id);
   say(id.address);
-  say(c.dim(`  ${Number(st.uqor) / 1e6} QOR · ML-DSA-87 key ${st.mldsa ? "registered" : "missing"} · ML-KEM-1024 key ${st.kemIsOurs ? "published" : st.kem ? "different key on chain" : "missing"}`));
+  say(c.dim(`  ${Number(st.uqor) / 1e6} QOR · ML-DSA-87 key ${st.mldsa ? "registered" : "missing"} · ML-KEM-1024 key ${st.kemIsOurs ? "in the KEM registry" : st.kem ? "different key in the registry" : "not in the registry"} · card ${card ? "on chain" : "missing"}`));
 }
 
 async function lock(pos: string[], flags: Record<string, string | true>) {
@@ -208,18 +258,18 @@ async function lock(pos: string[], flags: Record<string, string | true>) {
     if (typeof flags.to === "string") throw new CofferError("USAGE", `${sealedPath} already exists; add readers with "coffer share <qor1...>"`);
     const f = readSealed(sealedPath);
     await checkFile(f, { path: sealedPath, acceptOwner: flags["accept-owner"] === true });
-    const g = updateCoffer(f, id, id.sealKeys, enc.encode(serializeDotenv(entries)));
+    const g = await updateCoffer(f, localSigner(id), id.sealKeys, enc.encode(serializeDotenv(entries)));
     writeSealed(sealedPath, g);
     say(`${c.green("sealed")} ${entries.length} values into ${sealedPath} ${c.dim(`(version ${g.version}, readers unchanged: ${g.readers.length})`)}`);
   } else {
     const to = typeof flags.to === "string" ? flags.to.split(",") : [];
-    const readers = await Promise.all(to.map((a) => fetchReader(net, a.trim())));
-    const f = createCoffer({ chainId: net.chainId, name: plainName(sealedPath), owner: id, ownerMlkem: id.sealKeys.mlkemPublicKey, readers, plaintext: enc.encode(serializeDotenv(entries)) });
-    const txs = await recordGrant(net, id, { op: "create", fileId: f.id, epoch: f.epoch, version: f.version, added: readers.map((r) => r.address), removed: [] });
+    const readers = await Promise.all(to.map((a) => fetchReader(evmNet, a.trim())));
+    const o = owner(id);
+    const f = await createCoffer({ chainId: net.chainId, name: plainName(sealedPath), owner: o.signer, ownerKeys: o.keys, readers, plaintext: enc.encode(serializeDotenv(entries)) });
+    say(`${c.green("sealed")} ${entries.length} values into ${sealedPath}`);
+    await recordHead(f);
     writeSealed(sealedPath, f);
     pin(sealedPath, f.owner);
-    say(`${c.green("sealed")} ${entries.length} values into ${sealedPath}`);
-    txs.forEach((t) => txLine("recorded on chain", t));
   }
   say(c.dim(`  commit ${sealedPath}. You can delete ${plain} once your team has it; "coffer run" never needs it.`));
 }
@@ -256,12 +306,11 @@ async function share(pos: string[], flags: Record<string, string | true>) {
   const f = readSealed(path);
   await checkFile(f, { path: path, acceptOwner: flags["accept-owner"] === true });
   const id = loadIdentity();
-  const readers = await Promise.all(pos.map((a) => fetchReader(net, a)));
-  const g = shareCoffer(f, id, id.sealKeys, readers);
-  const txs = await recordGrant(net, id, { op: "share", fileId: g.id, epoch: g.epoch, version: g.version, added: readers.map((r) => r.address), removed: [] });
-  writeSealed(path, g);
+  const readers = await Promise.all(pos.map((a) => fetchReader(evmNet, a)));
+  const g = await shareCoffer(f, localSigner(id), id.sealKeys, readers);
   say(`${c.green("shared")} ${path} with ${readers.length} reader(s); epoch ${g.epoch}`);
-  txs.forEach((t) => txLine("recorded on chain", t));
+  await recordHead(g);
+  writeSealed(path, g);
   say(c.dim(`  commit ${path} so they get it.`));
 }
 
@@ -271,11 +320,10 @@ async function revoke(pos: string[], flags: Record<string, string | true>) {
   const f = readSealed(path);
   await checkFile(f, { path: path, acceptOwner: flags["accept-owner"] === true });
   const id = loadIdentity();
-  const { file, rotate } = revokeCoffer(f, id, id.sealKeys, pos, (p) => parseDotenv(dec.decode(p)).map((e) => e.key));
-  const txs = await recordGrant(net, id, { op: "revoke", fileId: file.id, epoch: file.epoch, version: file.version, added: [], removed: pos });
-  writeSealed(path, file);
+  const { file, rotate } = await revokeCoffer(f, localSigner(id), id.sealKeys, pos, (p) => parseDotenv(dec.decode(p)).map((e) => e.key));
   say(`${c.green("revoked")} ${pos.length} reader(s); epoch ${file.epoch}. They cannot open this or any later version.`);
-  txs.forEach((t) => txLine("recorded on chain", t));
+  await recordHead(file);
+  writeSealed(path, file);
   say();
   say(c.bold("They may still have the values they already read. Rotate these at the provider:"));
   for (const k of rotate) say(`  ${k}`);
@@ -295,13 +343,13 @@ async function importCmd(pos: string[], flags: Record<string, string | true>) {
   const sealedPath = sealedName(envPath);
   if (existsSync(sealedPath)) throw new CofferError("EXISTS", `${sealedPath} already exists`);
   const to = typeof flags.to === "string" ? flags.to.split(",") : [];
-  const readers = await Promise.all(to.map((a) => fetchReader(net, a.trim())));
-  const f = createCoffer({ chainId: net.chainId, name: plainName(sealedPath), owner: id, ownerMlkem: id.sealKeys.mlkemPublicKey, readers, plaintext: enc.encode(serializeDotenv(imp.entries)) });
-  const txs = await recordGrant(net, id, { op: "create", fileId: f.id, epoch: f.epoch, version: f.version, added: readers.map((r) => r.address), removed: [] });
+  const readers = await Promise.all(to.map((a) => fetchReader(evmNet, a.trim())));
+  const o = owner(id);
+  const f = await createCoffer({ chainId: net.chainId, name: plainName(sealedPath), owner: o.signer, ownerKeys: o.keys, readers, plaintext: enc.encode(serializeDotenv(imp.entries)) });
+  say(`${c.green("moved")} ${imp.entries.length} values from dotenvx (secp256k1) to ${sealedPath} (ML-KEM-1024 + X25519)`);
+  await recordHead(f);
   writeSealed(sealedPath, f);
   pin(sealedPath, f.owner);
-  say(`${c.green("moved")} ${imp.entries.length} values from dotenvx (secp256k1) to ${sealedPath} (ML-KEM-1024)`);
-  txs.forEach((t) => txLine("recorded on chain", t));
   say(c.dim(`  the dotenvx copy in your git history stays readable to anyone with ${keysPath}, and to a quantum computer later. Rotate these values when you can.`));
 }
 
@@ -327,7 +375,7 @@ async function setCmd(pos: string[], flags: Record<string, string | true>, unset
       if (e) e.value = value; else entries.push({ key, value });
     }
   }
-  const g = updateCoffer(f, id, id.sealKeys, enc.encode(serializeDotenv(entries)));
+  const g = await updateCoffer(f, localSigner(id), id.sealKeys, enc.encode(serializeDotenv(entries)));
   writeSealed(path, g);
   say(`${c.green(unset ? "removed" : "set")} ${pos.map((p) => p.split("=")[0]).join(", ")} in ${path} ${c.dim(`(version ${g.version})`)}`);
 }
@@ -354,13 +402,9 @@ async function status(flags: Record<string, string | true>) {
   } catch (e) {
     say(`  ${c.red("CHECK FAILED")}: ${(e as Error).message}`);
   }
-  const hist = await grantHistory(net, f.owner, f.id);
-  say(`  history on chain (${hist.length})`);
-  for (const h of hist) {
-    const who = [...h.added.map((a) => `+${a}`), ...h.removed.map((a) => `-${a}`)].join(" ");
-    say(`    ${h.time.slice(0, 16).replace("T", " ")}  ${h.op.padEnd(6)} epoch ${h.epoch}  ${who}`);
-    say(c.dim(`      ${net.explorerTx?.(h.hash) ?? h.hash}`));
-  }
+  const head = await readHead(evmNet, f.id);
+  if (!head) say(`  on QoreChain: ${c.red("not recorded")}`);
+  else say(`  on QoreChain: epoch ${head.epoch}, owner ${head.owner}, recorded at block ${head.height} ${c.dim(`(contract ${evmNet.coffer})`)}`);
 }
 
 function askHidden(prompt: string): Promise<string> {
@@ -386,15 +430,14 @@ async function recordCmd(flags: Record<string, string | true>) {
   const id = loadIdentity();
   if (id.address !== f.owner) throw new CofferError("NOT_OWNER", "only the owner records changes to this file");
   verifyCoffer(f, await fetchPqKeys(net, [f.owner, f.writer]));
-  const top = await latestEpoch(net, f.owner, f.id);
-  if (top >= f.epoch) return say(`epoch ${f.epoch} is already recorded on chain`);
-  const txs = await recordGrant(net, id, { op: "share", fileId: f.id, epoch: f.epoch, version: f.version, added: f.readers.filter((r) => r !== f.owner), removed: [] });
-  txs.forEach((t) => txLine("recorded on chain", t));
+  const head = await readHead(evmNet, f.id);
+  if (head && head.epoch >= f.epoch) return say(`epoch ${f.epoch} is already recorded on chain`);
+  await recordHead(f);
 }
 
 const HELP = `coffer: push your secrets to GitHub. Only your team can open them.
 
-  coffer init                      make your identity and publish your keys on QoreChain
+  coffer init                      make your identity and publish your card on QoreChain
   coffer whoami                    your address and key status
   coffer lock [.env] [--to qor1..] seal .env into .env.coffer (safe to commit)
   coffer import [.env] [--keys .env.keys]   move a dotenvx file to Coffer
@@ -404,7 +447,7 @@ const HELP = `coffer: push your secrets to GitHub. Only your team can open them.
   coffer set KEY | unset KEY       change a value (it asks for it); nothing plain on disk
   coffer record                    re-send the chain record for the current epoch (owner)
   coffer keys                      list the names in the file
-  coffer status                    readers, epoch, signature check, on-chain history
+  coffer status                    readers, epoch, signature check, the record on chain
 
   -f, --file <path>   sealed file (default .env.coffer)
   --accept-owner      trust a file whose owner changed since this machine last saw it

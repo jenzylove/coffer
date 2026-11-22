@@ -1,37 +1,24 @@
-// /app: create an address, then a dashboard of the files sealed in this browser.
-// Each change is recorded on QoreChain before the file is saved (as in the CLI).
-// The selected file is shown as the document: names with black bars, the To list,
-// and the proof with the demo teammate. Raw data stays behind "Details".
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+// /app: connect QoreX (or use a key in this browser), then a dashboard of the
+// files sealed here. Every change is signed once (one QoreX approval) and
+// recorded on QoreChain before the new version is kept. The selected file is
+// shown as the document: names with black bars, the To list, and the proof
+// with Ada, the demo teammate. Raw data stays behind "Details".
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Page } from "../components/Chrome.tsx";
 import { Bar, Sheet, Stamp } from "../components/Doc.tsx";
 import { IdentityProvider, useIdentity, isReady } from "../lib/identity.tsx";
-import { api, download, errCode, qor, short } from "../lib/net.ts";
-import { SETUP_UQOR, dripAndWait, record, remember } from "../lib/ops.ts";
-import { work } from "../lib/crypto.ts";
-import { parseCoffer, type CofferFile } from "../../../src/core/vault.ts";
+import { api, coded, download, errCode, explorerTx, isQorAddress, qor, short, sleep } from "../lib/net.ts";
+import { SETUP_UQOR, dripAndWait, loadFiles, publishCard, recordHead, saveFiles, type Recorded, type Stored } from "../lib/ops.ts";
+import { onWalletAsk, work } from "../lib/crypto.ts";
+import { changedReaders, hasCard, readHead, registerIdentity } from "../lib/chain.ts";
+import { parseCoffer, type ChainHead } from "../../../src/core/vault.ts";
 import { parseDotenv, serializeDotenv, type DotenvEntry } from "../../../src/core/dotenv.ts";
-import type { Grant, GrantRecord } from "../../../src/chain/qore.ts";
-import { fetchReader, grantHistory, registerIdentity } from "../lib/chain.ts";
 import { IMPORT_KEY, type ImportHint } from "../landing/ScanDoor.tsx";
-import { Addr, Chips, DropText, Log, Problem, Progress, Result, TxLink, type LogLine } from "./bits.tsx";
+import { Addr, Chips, CopyAction, DropText, KeyFilePicker, Log, Problem, Progress, RecordFacts, Result, TxLink, type LogLine } from "./bits.tsx";
 import { OpenFile } from "./OpenFile.tsx";
 
-// ---- files kept in this browser (sealed text only: safe to store) ------------
-
-interface Stored { text: string; old?: string; tx?: string; changed: string; note?: string; removed?: string[] }
-const FILES = "coffer.files";
-function loadFiles(): Stored[] {
-  try {
-    const list = JSON.parse(localStorage.getItem(FILES) ?? "null") as Stored[] | null;
-    if (list) return list;
-    const one = localStorage.getItem("coffer.file"); // earlier versions kept a single file
-    if (one) return [{ text: one, old: localStorage.getItem("coffer.oldfile") ?? undefined, changed: new Date().toISOString() }];
-  } catch { /* storage blocked */ }
-  return [];
-}
-function saveFiles(list: Stored[]) { try { localStorage.setItem(FILES, JSON.stringify(list)); localStorage.setItem("coffer.file", list[0]?.text ?? ""); } catch { /* storage blocked */ } }
 const idOf = (s: Stored) => { try { return parseCoffer(s.text).id; } catch { return ""; } };
+const ownerOf = (s: Stored) => { try { return parseCoffer(s.text).owner; } catch { return ""; } };
 
 function ago(iso: string): string {
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -43,14 +30,24 @@ function ago(iso: string): string {
 
 function useLog() {
   const [lines, setLines] = useState<LogLine[]>([]);
-  return {
+  return useMemo(() => ({
     lines,
     reset: () => setLines([]),
     step: (text: string, hash?: string) => setLines((x) => [...x.map((y) => (y.state === "doing" ? { ...y, state: "done" as const } : y)), { text, hash, state: hash ? "done" : "doing" }]),
     done: (text?: string, hash?: string) => setLines((x) => [...x.map((y) => (y.state === "doing" ? { ...y, state: "done" as const } : y)), ...(text ? [{ text, hash, state: "done" as const }] : [])]),
     fail: () => setLines((x) => x.map((y) => (y.state === "doing" ? { ...y, state: "err" as const } : y))),
-  };
+  }), [lines]);
 }
+
+// ---- an invite: /app?from=qor1… ----------------------------------------------------
+
+const FROM_KEY = "coffer.from";
+function readFrom(): string | null {
+  const q = new URLSearchParams(location.search).get("from");
+  if (q && isQorAddress(q)) { try { sessionStorage.setItem(FROM_KEY, q); } catch { /* storage blocked */ } return q; }
+  try { const s = sessionStorage.getItem(FROM_KEY); return s && isQorAddress(s) ? s : null; } catch { return null; }
+}
+const inviteLink = (owner: string) => `${location.origin}/app?from=${owner}`;
 
 export default function AppRoute() {
   return (
@@ -64,15 +61,28 @@ export default function AppRoute() {
 
 function App() {
   const ident = useIdentity();
-  const { phrase, id, deriving, status, statusError } = ident;
-  const [readyMoment, setReadyMoment] = useState(false);
-  const ready = isReady(status);
+  const [from, setFrom] = useState(readFrom);
+  const ready = isReady(ident.status);
+  // "Ready." stays on screen for a moment, but only after a setup this visit
+  const sawSetup = useRef(false);
+  if (ident.status && !ready) sawSetup.current = true;
+  const [celebrated, setCelebrated] = useState(false);
+  const celebrating = ready && sawSetup.current && !celebrated;
+  useEffect(() => {
+    if (!celebrating) return;
+    const t = setTimeout(() => setCelebrated(true), 1600);
+    return () => clearTimeout(t);
+  }, [celebrating]);
+  const inviteDone = useCallback(() => {
+    try { sessionStorage.removeItem(FROM_KEY); } catch { /* storage blocked */ }
+    if (location.search) history.replaceState(null, "", "/app");
+    setFrom(null);
+  }, []);
 
-  if (!phrase) return <Onboard />;
-  if (deriving || !id) return <Hold title="Making your keys." line="This happens in your browser and takes a few seconds." />;
-  if (!status && !statusError) return <Hold title="Checking your address." line="Reading QoreChain." />;
-  if (!ready || readyMoment) return <Setup onReady={() => { setReadyMoment(true); setTimeout(() => setReadyMoment(false), 1600); }} />;
-  return <Dashboard />;
+  if (!ident.address) return ident.busy && ident.kind && ident.busy !== "Waiting for QoreX." ? <Hold title={ident.busy} line="This takes a moment." /> : <Connect from={from} />;
+  if (!ident.status && !ident.statusError) return <Hold title="Checking QoreChain." line="Reading your keys and your card." />;
+  if (!ready || celebrating) return <Setup from={from} />;
+  return <Dashboard from={from} onInviteDone={inviteDone} />;
 }
 
 function Hold({ title, line }: { title: string; line: string }) {
@@ -87,99 +97,215 @@ function Hold({ title, line }: { title: string; line: string }) {
   );
 }
 
-// ---- no address yet -------------------------------------------------------------
+// ---- connect ---------------------------------------------------------------------
 
-function Onboard() {
+function Connect({ from }: { from: string | null }) {
   const ident = useIdentity();
-  const [paste, setPaste] = useState("");
-  const [pasteOpen, setPasteOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<unknown>(null);
+  const waiting = ident.busy !== null;
+  const error = err ?? ident.error;
   return (
     <section className="onboard" id="address">
       <div className="wrap onboard-in">
-        <h1 className="h-display h1">Create your address.</h1>
-        <p className="lead">It's made from a 24 word recovery phrase, right here in your browser. No wallet, no sign up.</p>
-        <div className="actions">
-          <button className="btn" disabled={busy} onClick={async () => { setBusy(true); try { await ident.create(); } finally { setBusy(false); } }}>
-            {busy ? "Making your address" : "Make a new address"}
-          </button>
-          <button className="link" onClick={() => setPasteOpen((v) => !v)} aria-expanded={pasteOpen}>I have a recovery phrase</button>
-        </div>
-        {pasteOpen && (
-          <form className="phrase-form" onSubmit={async (e) => {
-            e.preventDefault(); setErr(null);
-            try { await ident.restore(paste); setPaste(""); } catch (x) { setErr(x); }
-          }}>
-            <label htmlFor="phrase" className="label">Recovery phrase, 24 words</label>
-            <textarea id="phrase" className="mono" rows={3} value={paste} onChange={(e) => setPaste(e.target.value)} spellCheck={false} autoComplete="off" />
-            <div><button className="btn-outline">Use this phrase</button></div>
-            {err !== null && <Problem error={err} text="That isn't a valid 24 word recovery phrase." />}
-          </form>
+        {from ? (
+          <>
+            <h1 className="h-display h1">You're invited.</h1>
+            <p className="lead"><span className="mono">{short(from, 8, 4)}</span> invited you to open a sealed .env. Connect QoreX and sign once (no fee). Then send them your address.</p>
+          </>
+        ) : (
+          <>
+            <h1 className="h-display h1">Connect QoreX.</h1>
+            <p className="lead">Coffer seals your .env to your team's QoreChain wallets. Connect QoreX and sign once. It's free and sends nothing.</p>
+          </>
         )}
+        <div className="actions">
+          <button className="btn" disabled={waiting} onClick={() => void ident.connectQorex()}>
+            {ident.busy === "Waiting for QoreX." ? "Waiting for QoreX" : "Connect QoreX"}
+          </button>
+          <button className="link" disabled={waiting} onClick={() => void ident.chooseBrowser()}>No QoreX? Use this browser</button>
+          <KeyFilePicker onText={async (t) => { setErr(null); try { await ident.loadKeyFile(t); } catch (e) { setErr(e); } }} />
+        </div>
+        {ident.busy === "Making a key in this browser." && <Progress lines={[{ text: "Making a key in this browser", state: "doing" }]} />}
+        {ident.walletMissing && (
+          <div className="calm">
+            <p>QoreX isn't in this browser. Install the QoreX extension and reload this page, or use this browser instead: Coffer keeps a key here and pays its setup.</p>
+          </div>
+        )}
+        {error !== null && error !== undefined && <Problem error={error} />}
       </div>
     </section>
   );
 }
 
-// ---- setup: starts by itself; "Get set up" only to retry -------------------------
+// ---- setup: one card on QoreChain --------------------------------------------------
 
-function Setup({ onReady }: { onReady: () => void }) {
+function Setup({ from }: { from: string | null }) {
+  // the App keeps this screen up with "Ready." for a moment once the status says so
   const ident = useIdentity();
-  const { id, status } = ident;
+  const { kind, status, statusError } = ident;
+  const ready = isReady(status);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<unknown>(null);
-  const [started, setStarted] = useState(false);
   const log = useLog();
-  const ready = isReady(status);
+  const tried = useRef(false);
 
-  const setup = useCallback(async () => {
-    if (!id) return;
-    setStarted(true); setBusy(true); setErr(null); log.reset();
-    try {
-      log.step("Checking your address");
+  /** After the card is on chain, wait until QoreChain shows it with these keys. */
+  const waitForCard = useCallback(async () => {
+    log.step("Waiting for QoreChain to show it");
+    for (let i = 0; i < 30; i++) {
       const st = await ident.refresh();
-      if (!st) throw new Error("QoreChain can't be reached right now. Try again in a moment.");
-      if (st.uqor < SETUP_UQOR && !(st.mldsa && st.kemIsOurs)) {
-        log.step("Paying setup");
-        await dripAndWait(id, SETUP_UQOR, (_t, hash) => log.step("Setup paid by the Coffer relayer", hash));
-      }
-      await registerIdentity(id, (s, hash) => {
-        if (hash) log.step(s.startsWith("ML-DSA") ? "Signing key registered" : "Sealing key published", hash);
-        else log.step(s.startsWith("registering") ? "Registering your signing key" : "Publishing your sealing key");
-      });
-      log.done();
-      const after = await ident.refresh();
-      if (isReady(after)) onReady();
+      if (isReady(st)) { log.done(); return; }
+      await sleep(2000);
+    }
+    throw new Error("QoreChain has the card but isn't showing it yet. Check again in a minute.");
+  }, [ident, log]);
+
+  const signCard = useCallback(async (fresh: boolean) => {
+    if (!ident.owner) return;
+    setBusy(true); setErr(null); log.reset();
+    try {
+      const keys = fresh ? await ident.newKey() : await ident.ensureKeys();
+      await publishCard(ident.owner, keys, (s, h) => log.step(s, h));
+      await waitForCard();
     } catch (e) {
       log.fail();
       setErr(e);
     } finally {
       setBusy(false);
     }
-  }, [id, ident, log, onReady]);
+  }, [ident, log, waitForCard]);
 
-  useEffect(() => { if (!started && !ready && id) void setup(); }, [started, ready, id, setup]);
+  const setupBrowser = useCallback(async () => {
+    const id = ident.id;
+    if (!id || !ident.owner) return;
+    setBusy(true); setErr(null); log.reset();
+    try {
+      log.step("Checking this key on QoreChain");
+      let st = await ident.refresh();
+      if (!st) throw coded("REST_ERROR", "QoreChain can't be reached right now.");
+      if (!st.pq || !st.kemIsOurs) {
+        if (st.uqor < SETUP_UQOR) {
+          log.step("Paying setup");
+          await dripAndWait(id.address, SETUP_UQOR, (_t, h) => log.step("Setup paid by the Coffer relayer", h));
+        }
+        await registerIdentity(id, (s, h) => {
+          if (h) log.step(s.startsWith("ML-DSA") ? "Signing key registered" : "Sealing key published", h);
+          else log.step(s.startsWith("registering") ? "Registering your signing key" : "Publishing your sealing key");
+        });
+        st = await ident.refresh();
+      }
+      if (st?.card.state === "error") throw coded(st.card.code ?? "NO_CONTRACT", st.card.message);
+      if (st?.card.state !== "ours") {
+        await publishCard(ident.owner, id.sealKeys, (s, h) => log.step(s, h));
+        await waitForCard();
+      } else {
+        log.done();
+      }
+    } catch (e) {
+      log.fail();
+      setErr(e);
+    } finally {
+      setBusy(false);
+    }
+  }, [ident, log, waitForCard]);
 
+  // a key in this browser sets itself up; QoreX asks for the card at once only right after Connect
+  useEffect(() => {
+    if (tried.current || ready || !status || busy) return;
+    if (kind === "local") { tried.current = true; void setupBrowser(); }
+    else if (kind === "qorex" && ident.justConnected && status.pq && status.card.state === "none") { tried.current = true; void signCard(false); }
+  }, [kind, ready, status, busy, ident.justConnected, setupBrowser, signCard]);
+
+  // no signing key on chain yet: look again every 10 seconds
+  const needsSend = kind === "qorex" && !!status && !status.pq;
+  useEffect(() => {
+    if (!needsSend) return;
+    const t = setInterval(() => void ident.refresh(), 10_000);
+    return () => clearInterval(t);
+  }, [needsSend, ident]);
+
+  const card = status?.card;
+  const invite = from ? <p className="muted small">Invited by <span className="mono">{short(from, 8, 4)}</span></p> : null;
+  const details = log.lines.length > 0 && <details className="raw"><summary>Steps</summary><Log lines={log.lines} /></details>;
+  let body;
+  if (ready) {
+    body = <><h1 className="h-display h1">Ready.</h1><Result>Anyone can seal files to you now.</Result></>;
+  } else if (!status) {
+    body = (
+      <>
+        <h1 className="h-display h1">Can't reach QoreChain.</h1>
+        <Problem error={statusError} />
+        <div className="actions"><button className="btn" onClick={() => void ident.refresh()}>Try again</button></div>
+      </>
+    );
+  } else if (kind === "local") {
+    body = (
+      <>
+        <h1 className="h-display h1">{err ? "Setup stopped." : "Setting up this browser."}</h1>
+        <p className="lead">Coffer puts your public keys on QoreChain so teammates can seal files to you. The Coffer relayer pays.</p>
+        {busy && <Progress lines={log.lines} />}
+        {err !== null && <Problem error={err} />}
+        {!busy && err !== null && (
+          <div className="actions">
+            <button className="btn" onClick={() => void setupBrowser()}>Try again</button>
+            <button className="link" onClick={() => ident.disconnect()}>Use QoreX instead</button>
+          </div>
+        )}
+        {details}
+      </>
+    );
+  } else if (!status.pq) {
+    body = (
+      <>
+        <h1 className="h-display h1">One step in QoreX first.</h1>
+        <p className="lead">Send any amount once from QoreX. To yourself is fine. QoreX registers its quantum safe key with the first transfer, and this page checks again every few seconds.</p>
+        <div className="actions">
+          <button className="btn-outline" onClick={() => void ident.refresh()}>Check again</button>
+          <button className="link" onClick={() => void ident.chooseBrowser()}>Use this browser instead</button>
+        </div>
+      </>
+    );
+  } else if (card?.state === "error") {
+    body = (
+      <>
+        <h1 className="h-display h1">Not open yet.</h1>
+        <Problem error={coded(card.code ?? "NO_CONTRACT", card.message)} />
+        <div className="actions"><button className="btn" onClick={() => void ident.refresh()}>Try again</button></div>
+      </>
+    );
+  } else if (card?.state === "other") {
+    body = (
+      <>
+        <h1 className="h-display h1">Your key is in another browser.</h1>
+        <p className="lead">This wallet signed its card somewhere else, so the key that opens your files is there. Load your key file, or make a new key here.</p>
+        <div className="actions">
+          <KeyFilePicker className="btn" onText={async (t) => { setErr(null); try { await ident.loadKeyFile(t); } catch (e) { setErr(e); } }} />
+          <button className="btn-outline" disabled={busy} onClick={() => void signCard(true)}>{busy ? "Making a new key" : "Make a new key here"}</button>
+        </div>
+        <p className="muted small">A new key works at once for new files. Files already shared with you need sharing again; the owner's app does that with one click.</p>
+        {busy && <Progress lines={log.lines} />}
+        {err !== null && <Problem error={err} />}
+        {details}
+      </>
+    );
+  } else {
+    body = (
+      <>
+        <h1 className="h-display h1">{busy ? "Sign once in QoreX." : "One signature to finish."}</h1>
+        <p className="lead">QoreX shows a short card with your public keys. Signing is free and sends nothing. Then anyone can seal files to your address.</p>
+        <div className="actions">
+          <button className="btn" disabled={busy} onClick={() => void signCard(false)}>{busy ? "Signing" : "Sign in QoreX"}</button>
+          {!busy && errCode(err) === "CARD_REFUSED" && <button className="link" onClick={() => void ident.chooseBrowser()}>Use this browser instead</button>}
+        </div>
+        {busy && <Progress lines={log.lines} />}
+        {err !== null && <Problem error={err} />}
+        {details}
+      </>
+    );
+  }
   return (
     <section className="onboard" id="address">
-      <div className="wrap onboard-in">
-        {ready ? (
-          <>
-            <h1 className="h-display h1">Ready.</h1>
-            <Result>Ready. Anyone can seal files to you now.</Result>
-          </>
-        ) : (
-          <>
-            <h1 className="h-display h1">{err ? "Setup stopped." : "Setting up."}</h1>
-            <p className="lead">Your public keys go on QoreChain so teammates can seal files to you. The Coffer relayer pays.</p>
-            {busy && <Progress lines={log.lines} />}
-            {err !== null && <Problem error={err} />}
-            {!busy && <div className="actions"><button className="btn" onClick={() => void setup()}>Get set up</button></div>}
-            {log.lines.length > 0 && <details className="raw"><summary>Details</summary><Log lines={log.lines} /></details>}
-          </>
-        )}
-      </div>
+      <div className="wrap onboard-in">{invite}{body}</div>
     </section>
   );
 }
@@ -188,17 +314,17 @@ function Setup({ onReady }: { onReady: () => void }) {
 
 type View = { kind: "file"; id: string } | { kind: "seal" } | { kind: "open" };
 
-function Dashboard() {
-  const { id } = useIdentity();
+function Dashboard({ from, onInviteDone }: { from: string | null; onInviteDone: () => void }) {
+  const { address } = useIdentity();
   const [files, setFilesRaw] = useState<Stored[]>(loadFiles);
   const setFiles = (f: (x: Stored[]) => Stored[]) => setFilesRaw((x) => { const n = f(x); saveFiles(n); return n; });
-  const mine = useMemo(() => files.filter((s) => { try { return parseCoffer(s.text).owner === id?.address; } catch { return false; } }), [files, id]);
+  const mine = useMemo(() => files.filter((s) => ownerOf(s) === address), [files, address]);
   const [view, setView] = useState<View>(() => {
     if (location.hash === "#open") return { kind: "open" };
     if (location.hash === "#seal" || !mine.length) return { kind: "seal" };
     return { kind: "file", id: idOf(mine[0]!) };
   });
-  const pick = (v: View) => { history.replaceState(null, "", v.kind === "open" ? "/app#open" : v.kind === "seal" ? "/app#seal" : "/app"); setView(v); };
+  const pick = (v: View) => { history.replaceState(null, "", v.kind === "open" ? "/app#open" : v.kind === "seal" ? "/app#seal" : "/app"); setView(v); if (from) onInviteDone(); };
   useEffect(() => {
     const on = () => { if (location.hash === "#open") setView({ kind: "open" }); else if (location.hash === "#seal") setView({ kind: "seal" }); };
     addEventListener("hashchange", on);
@@ -209,7 +335,7 @@ function Dashboard() {
   const current = view.kind === "file" ? mine.find((s) => idOf(s) === view.id) : undefined;
 
   return (
-    <div className="dash wrap">
+    <div className={from ? "dash dash-invited wrap" : "dash wrap"}>
       <aside className="dash-left">
         <KeysBlock />
         <div className="files" role="tablist" aria-label="Your files" aria-orientation="vertical">
@@ -218,59 +344,86 @@ function Dashboard() {
           {mine.map((s) => {
             const f = parseCoffer(s.text);
             return (
-              <button key={f.id} role="tab" aria-selected={view.kind === "file" && view.id === f.id} className="file-row" onClick={() => pick({ kind: "file", id: f.id })}>
+              <button key={f.id} role="tab" aria-selected={!from && view.kind === "file" && view.id === f.id} className="file-row" onClick={() => pick({ kind: "file", id: f.id })}>
                 <span className="mono file-name">{f.name}.coffer</span>
                 <span className="file-meta">{f.readers.length} {f.readers.length === 1 ? "reader" : "readers"} · {ago(s.changed)}</span>
               </button>
             );
           })}
-          <button role="tab" aria-selected={view.kind === "seal"} className={view.kind === "seal" ? "btn-outline btn-block" : "btn btn-block"} onClick={() => pick({ kind: "seal" })}>Seal a file</button>
-          <button role="tab" aria-selected={view.kind === "open"} className="file-row file-open" onClick={() => pick({ kind: "open" })}>
+          <button role="tab" aria-selected={!from && view.kind === "seal"} className={!from && view.kind === "seal" ? "btn-outline btn-block" : "btn btn-block"} onClick={() => pick({ kind: "seal" })}>Seal a file</button>
+          <button role="tab" aria-selected={!from && view.kind === "open"} className="file-row file-open" onClick={() => pick({ kind: "open" })}>
             <span className="file-name">Open a file</span>
             <span className="file-meta">Paste or drop a .env.coffer</span>
           </button>
         </div>
       </aside>
       <div className="dash-main">
-        {view.kind === "seal" && (
-          <SealPanel onSealed={(text, tx) => {
-            const f = parseCoffer(text);
-            setFiles((list) => [{ text, tx, changed: new Date().toISOString(), note: "Sealed. Safe to commit." }, ...list]);
-            pick({ kind: "file", id: f.id });
-          }} />
-        )}
-        {view.kind === "open" && <OpenFile />}
-        {view.kind === "file" && current && <FileDetail stored={current} onChange={(patch) => update(idOf(current), patch)} />}
-        {view.kind === "file" && !current && <p className="muted">That file isn't in this browser any more.</p>}
+        {from ? <Invited from={from} onDone={onInviteDone} /> : <>
+          {view.kind === "seal" && (
+            <SealPanel onSealed={(text, rec) => {
+              const f = parseCoffer(text);
+              const at = new Date().toISOString();
+              setFiles((list) => [{ text, tx: rec.hash, block: rec.block, changed: at, note: "Sealed. Safe to commit.", log: [{ what: "Sealed", hash: rec.hash, block: rec.block, at }] }, ...list]);
+              pick({ kind: "file", id: f.id });
+            }} />
+          )}
+          {view.kind === "open" && <OpenFile />}
+          {view.kind === "file" && current && <FileDetail stored={current} onChange={(patch) => update(idOf(current), patch)} />}
+          {view.kind === "file" && !current && <p className="muted">That file isn't in this browser any more.</p>}
+        </>}
       </div>
     </div>
   );
 }
 
+/** After an invite: the one thing left is to send the owner this address. */
+function Invited({ from, onDone }: { from: string; onDone: () => void }) {
+  const { address } = useIdentity();
+  if (!address) return null;
+  return (
+    <section className="panel" id="invited" aria-labelledby="h-invited">
+      <h2 id="h-invited" className="h-section">You're set up.</h2>
+      <p className="lead">Now send <span className="mono">{short(from, 8, 4)}</span> your address. When they add you, the file opens here with your key.</p>
+      <p className="addr-box mono">{address}</p>
+      <div className="actions">
+        <CopyAction className="btn" text={address} label="Copy my address" done="Address copied" />
+        <button className="link" onClick={onDone}>Go to my files</button>
+      </div>
+    </section>
+  );
+}
+
 function KeysBlock() {
   const ident = useIdentity();
-  const { id, phrase, status } = ident;
-  const [show, setShow] = useState(false);
-  if (!id) return null;
+  const { address, kind, status } = ident;
+  const [err, setErr] = useState<unknown>(null);
+  if (!address) return null;
+  const save = () => { const k = ident.keyFile(); if (k) download(k.name, k.text, "application/json"); };
   return (
     <section className="keys" id="address">
-      <p className="label">Your keys</p>
-      <Result>Ready. Anyone can seal files to you now.</Result>
+      <p className="label">{kind === "qorex" ? "Your QoreX address" : "Your address"}</p>
+      <Addr a={address} />
+      <div className="keys-ready"><Result>Ready. Anyone can seal files to you now.</Result></div>
       <div className="acts">
-        <button className="link" onClick={() => setShow((v) => !v)} aria-expanded={show}>{show ? "Hide recovery phrase" : "Show recovery phrase"}</button>
-        <button className="link" onClick={() => download("coffer-recovery-phrase.txt", `Coffer recovery phrase for ${id.address}\nIt opens every Coffer file shared with this address. Keep it private.\n\n${phrase}\n`)}>Save it as a file</button>
+        <button className="link" onClick={save}>Save my key file</button>
       </div>
-      <p className="muted small">Your recovery phrase opens everything shared with you. Keep it private.</p>
-      {show && <p className="phrase mono">{phrase}</p>}
+      <p className="muted small">The key that opens your files lives in this browser. Save a copy to open them anywhere. Keep it private.</p>
       <details className="raw">
         <summary>Details</summary>
         <dl className="facts">
-          <div><dt>Full address</dt><dd className="mono">{id.address}</dd></div>
-          {status && <div><dt>Balance</dt><dd className="mono">{qor(status.uqor)} test QOR</dd></div>}
-          {status && <div><dt>Signing key (ML-DSA-87)</dt><dd>{status.mldsa ? "Registered" : "Not yet"}</dd></div>}
-          {status && <div><dt>Sealing key (ML-KEM-1024)</dt><dd>{status.kemIsOurs ? "Published" : "Not yet"}</dd></div>}
+          <div><dt>Account</dt><dd>{kind === "qorex" ? "QoreX wallet" : "A key in this browser"}</dd></div>
+          <div><dt>Full address</dt><dd className="mono">{address}</dd></div>
+          {status?.card.state === "ours" && <div><dt>Card on QoreChain</dt><dd className="mono">block {status.card.height}</dd></div>}
+          {status && <div><dt>Signing key (ML-DSA-87)</dt><dd>{status.pq ? "On QoreChain" : "Not yet"}</dd></div>}
+          {status && kind === "local" && <div><dt>Balance</dt><dd className="mono">{qor(status.uqor)} test QOR</dd></div>}
         </dl>
-        <button className="link" onClick={() => { if (confirm("Remove this address from this browser? Without the recovery phrase you can't open files shared with it.")) ident.forget(); }}>Remove this address from this browser</button>
+        <div className="acts">
+          <KeyFilePicker label="Load a key file" onText={async (t) => { setErr(null); try { await ident.loadKeyFile(t); } catch (e) { setErr(e); } }} />
+          {kind === "qorex"
+            ? <button className="link" onClick={() => ident.disconnect()}>Disconnect QoreX</button>
+            : <button className="link" onClick={() => { if (confirm("Remove this key from this browser? Without your key file you can't open files shared with this address.")) ident.forgetKey(); }}>Remove this key from this browser</button>}
+        </div>
+        {err !== null && <Problem error={err} />}
       </details>
     </section>
   );
@@ -280,17 +433,6 @@ function KeysBlock() {
 
 function readHint(): ImportHint | null {
   try { const t = sessionStorage.getItem(IMPORT_KEY); return t ? JSON.parse(t) : null; } catch { return null; }
-}
-
-/** A teammate needs a Coffer address before files can be sealed to them: this copies a short invite. */
-function InviteButton({ className = "btn-outline" }: { className?: string }) {
-  const [done, setDone] = useState(false);
-  const text = `I'm sharing a sealed .env with you on Coffer. Open ${location.origin}/app, make an address (free, about 30 seconds), and send me the qor1 address it shows you.`;
-  return (
-    <button type="button" className={className} onClick={async () => { try { await navigator.clipboard.writeText(text); setDone(true); setTimeout(() => setDone(false), 1800); } catch { /* clipboard blocked */ } }}>
-      {done ? "Invite copied" : "Copy an invite"}
-    </button>
-  );
 }
 
 /** The three steps of using Coffer, so the next one is always in view. */
@@ -305,12 +447,30 @@ function Flow({ at }: { at: number }) {
   );
 }
 
-function SealPanel({ onSealed }: { onSealed: (text: string, tx?: string) => void }) {
-  const { id } = useIdentity();
+/** Steps of one change: build and sign it, then record it on QoreChain. Nothing is kept unless both work. */
+async function signAndRecord<T extends { text: string }>(
+  log: ReturnType<typeof useLog>, wallet: boolean, doing: string, build: () => Promise<T>,
+): Promise<{ r: T; rec: Recorded }> {
+  const stop = onWalletAsk((n) => { if (n > 0) log.step("Approve it in QoreX"); });
+  try {
+    log.step(doing);
+    const r = await build();
+    stop();
+    log.step(wallet ? "Signed. Recording it on QoreChain" : "Recording it on QoreChain");
+    const rec = await recordHead(r.text);
+    log.done("Recorded on QoreChain", rec.hash);
+    return { r, rec };
+  } finally {
+    stop();
+  }
+}
+
+function SealPanel({ onSealed }: { onSealed: (text: string, rec: Recorded) => void }) {
+  const { owner, keys: sealKeys, kind } = useIdentity();
   const [hint, setHint] = useState<ImportHint | null>(readHint);
   const [tab, setTab] = useState<"plain" | "dotenvx">(hint?.kind === "dotenvx" ? "dotenvx" : "plain");
   const [env, setEnv] = useState("");
-  const [keys, setKeys] = useState("");
+  const [envKeys, setEnvKeys] = useState("");
   const [hintErr, setHintErr] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<unknown>(null);
@@ -337,26 +497,20 @@ function SealPanel({ onSealed }: { onSealed: (text: string, tx?: string) => void
       return { entries: e, note: e.length ? null : "No NAME=value lines found." };
     }
     if (!scan.isDotenvx) return { entries: null, note: "This file isn't locked by dotenvx. Use \"Paste a .env\" instead." };
-    if (!keys.trim()) return { entries: null, note: `${scan.encryptedKeys.length} locked values found. Add the matching .env.keys to unlock them here.` };
-    try { return { entries: dx!.importDotenvx(env, keys).entries, note: null }; }
+    if (!envKeys.trim()) return { entries: null, note: `${scan.encryptedKeys.length} locked values found. Add the matching .env.keys to unlock them here.` };
+    try { return { entries: dx!.importDotenvx(env, envKeys).entries, note: null }; }
     catch { return { entries: null, note: "That .env.keys doesn't match this file." }; }
-  }, [env, keys, tab, dx, needsDx]);
+  }, [env, envKeys, tab, dx, needsDx]);
 
   async function seal() {
-    if (!id || !preview.entries?.length) return;
+    if (!owner || !sealKeys || !preview.entries?.length) return;
     setBusy(true); setErr(null); log.reset();
     try {
-      log.step("Sealing in your browser");
-      const text = await work<string>("create", { name, owner: id, env: serializeDotenv(preview.entries) });
-      const f = parseCoffer(text);
-      const grant: Grant = { op: "create", fileId: f.id, epoch: f.epoch, version: f.version, added: [], removed: [] };
-      log.step("Recording it on QoreChain");
-      const txs = await record(id, grant, (_t, hash) => log.step("Fee topped up by the relayer", hash));
-      log.done("Recorded on QoreChain", txs[0]?.hash);
-      setEnv(""); setKeys("");
+      const { r, rec } = await signAndRecord(log, owner.kind === "wallet", "Sealing in your browser",
+        async () => ({ text: await work<string>("create", { name, owner, keys: sealKeys, env: serializeDotenv(preview.entries!) }) }));
+      setEnv(""); setEnvKeys("");
       try { sessionStorage.removeItem(IMPORT_KEY); } catch { /* storage blocked */ }
-      remember(f);
-      onSealed(text, txs[0]?.hash);
+      onSealed(r.text, rec);
     } catch (e) {
       log.fail();
       setErr(e);
@@ -385,7 +539,7 @@ function SealPanel({ onSealed }: { onSealed: (text: string, tx?: string) => void
       <DropText id="envtext" label={tab === "plain" ? "Your .env" : "Your dotenvx .env"} value={env} onChange={setEnv} placeholder={"NAME=value\nOTHER_NAME=value"} />
       {tab === "dotenvx" && (
         <>
-          <DropText id="keystext" label="Its .env.keys" value={keys} onChange={setKeys} rows={3} placeholder="DOTENV_PRIVATE_KEY=…" />
+          <DropText id="keystext" label="Its .env.keys" value={envKeys} onChange={setEnvKeys} rows={3} placeholder="DOTENV_PRIVATE_KEY=…" />
           <p className="muted small">Unlocked here in your browser. Nothing is sent anywhere.</p>
         </>
       )}
@@ -396,7 +550,7 @@ function SealPanel({ onSealed }: { onSealed: (text: string, tx?: string) => void
       <div><button className="btn" disabled={busy || !preview.entries?.length} onClick={seal}>{busy ? "Sealing" : `Seal into ${name}.coffer`}</button></div>
       <Progress lines={log.lines} />
       {err !== null && <Problem error={err} />}
-      <p className="muted small">Values stay in this page's memory only. They are never saved in this browser.</p>
+      <p className="muted small">{kind === "qorex" ? "QoreX asks you to approve once. No fee. " : ""}Values stay in this page's memory only. They are never saved in this browser.</p>
     </section>
   );
 }
@@ -404,32 +558,38 @@ function SealPanel({ onSealed }: { onSealed: (text: string, tx?: string) => void
 // ---- one file, as the document -------------------------------------------------------
 
 type TeammateAnswer = { opened: true; keys: string[]; epoch: number | string; version: number | string; verified: boolean } | { opened: false; code?: string; error: string };
-type Outcome = { kind: "ask"; answer: TeammateAnswer; label: string } | { kind: "revoke"; rotate: string[]; who: string; tx?: string };
+type Outcome = { kind: "ask"; answer: TeammateAnswer; label: "first" | "again" | "old" } | { kind: "revoke"; rotate: string[]; who: string; ada: boolean; tx: string; block?: number };
 
 const REFUSED: Record<string, string> = {
-  NOT_A_READER: "They're not on the list any more.",
-  ROLLBACK: "This is an old copy. A newer version exists.",
+  NOT_A_READER: "Ada isn't on the list any more, so her key opens nothing.",
+  STALE: "This is an old copy. QoreChain has a newer one, so Ada won't use it.",
   BAD_SIGNATURE: "Someone changed this file by hand.",
   UNRECORDED: "QoreChain has no record of this version.",
+  FORKED: "QoreChain has a different reader list for this version.",
+  OWNER_MISMATCH: "QoreChain says this file belongs to someone else.",
 };
 
-async function getTeammate(): Promise<string> {
-  const r = await api<{ address: string }>("/api/teammate");
-  if (!r.address) throw new Error("The demo teammate isn't available right now.");
-  return r.address;
+let teammateCache: Promise<string> | null = null;
+function getTeammate(): Promise<string> {
+  teammateCache ??= api<{ address: string }>("/api/teammate").then((r) => {
+    if (!r.address) throw new Error("Ada, the demo teammate, isn't available right now.");
+    return r.address;
+  });
+  teammateCache.catch(() => { teammateCache = null; });
+  return teammateCache;
 }
 
 /** The owner's view of the values: names with bars; click a bar to see that one value, it closes again on blur. */
 function Values({ text }: { text: string }) {
-  const { id } = useIdentity();
+  const { keys } = useIdentity();
   const [entries, setEntries] = useState<DotenvEntry[] | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    if (id) work<DotenvEntry[]>("open", { text, keys: id.sealKeys }).then((e) => live && setEntries(e)).catch(() => live && setEntries([]));
+    if (keys) work<DotenvEntry[]>("open", { text, keys }).then((e) => live && setEntries(e)).catch(() => live && setEntries([]));
     return () => { live = false; };
-  }, [text, id]);
-  if (!entries) return <p className="sheet-wait">Opening with your keys…</p>;
+  }, [text, keys]);
+  if (!entries) return <p className="sheet-wait">Opening with your key…</p>;
   return (
     <div className="doc-values">
       {entries.map((e) => (
@@ -445,68 +605,137 @@ function Values({ text }: { text: string }) {
   );
 }
 
+/** QoreChain's record of this file, read live. */
+function HeadNow({ fileId, epoch }: { fileId: string; epoch: bigint }) {
+  const [head, setHead] = useState<ChainHead | null | undefined>(undefined);
+  const [err, setErr] = useState(false);
+  useEffect(() => { let live = true; setHead(undefined); setErr(false); readHead(fileId).then((h) => live && setHead(h)).catch(() => live && setErr(true)); return () => { live = false; }; }, [fileId, epoch]);
+  if (err) return <p className="muted small">QoreChain can't be reached right now.</p>;
+  if (head === undefined) return <p className="muted small">Reading QoreChain…</p>;
+  if (!head) return <p className="muted small">QoreChain has no record of this file.</p>;
+  return (
+    <dl className="facts">
+      <div><dt>On QoreChain now</dt><dd className="mono">epoch {String(head.epoch)} · version {String(head.version)}</dd></div>
+      <div><dt>Recorded in block</dt><dd className="mono">{head.height}</dd></div>
+      <div><dt>This copy</dt><dd className={head.epoch === epoch ? "ok" : "no"}>{head.epoch === epoch ? "Matches QoreChain" : "Older than QoreChain's"}</dd></div>
+    </dl>
+  );
+}
+
 function FileDetail({ stored, onChange }: { stored: Stored; onChange: (patch: Partial<Stored>) => void }) {
-  const { id } = useIdentity();
+  const { address, owner, keys } = useIdentity();
   const file = useMemo(() => parseCoffer(stored.text), [stored.text]);
   const [teammate, setTeammate] = useState<string | null>(null);
   const [addr, setAddr] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<unknown>(null);
+  const [invite, setInvite] = useState<string | null>(null);
   const [outcomes, setOutcomes] = useState<Outcome[]>([]);
+  const [arrived, setArrived] = useState<Record<string, boolean>>({});
+  const [changed, setChanged] = useState<string[]>([]);
   const log = useLog();
+  const wallet = owner?.kind === "wallet";
 
   useEffect(() => { getTeammate().then(setTeammate).catch(() => {}); }, []);
-  useEffect(() => { setOutcomes([]); setErr(null); log.reset(); }, [file.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setOutcomes([]); setErr(null); setInvite(null); log.reset(); }, [file.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // readers who made a new key since they were sealed in
+  useEffect(() => { let live = true; changedReaders(stored.text).then((x) => live && setChanged(x)).catch(() => {}); return () => { live = false; }; }, [stored.text]);
 
-  const name = (a: string) => (a === id?.address ? "You" : a === teammate ? "Demo teammate" : short(a, 6, 4));
+  // addresses invited from this file: look for their card every 10 seconds while the page is open
+  const waiting = useMemo(() => (stored.waiting ?? []).filter((a) => !file.readers.includes(a)), [stored.waiting, file.readers]);
+  useEffect(() => {
+    const list = waiting.filter((a) => !arrived[a]);
+    if (!list.length) return;
+    let live = true;
+    const tick = async () => {
+      for (const a of list) {
+        const has = await hasCard(a).catch(() => false);
+        if (has && live) setArrived((x) => ({ ...x, [a]: true }));
+      }
+    };
+    void tick();
+    const t = setInterval(() => void tick(), 10_000);
+    return () => { live = false; clearInterval(t); };
+  }, [waiting, arrived]);
+
+  const isAda = (a: string) => !!teammate && a === teammate;
+  const name = (a: string) => (a === address ? "You" : isAda(a) ? "Ada, demo teammate" : "Teammate");
+  const who = (a: string) => (isAda(a) ? "Ada" : short(a, 6, 4));
   const mateIn = !!teammate && file.readers.includes(teammate);
-  const mateRevoked = !!teammate && !mateIn && !!stored.old;
+  const mateRemoved = !!teammate && !mateIn && (stored.removed ?? []).includes(teammate);
+  const entry = (what: string, rec: Recorded) => ({ tx: rec.hash, block: rec.block, log: [...(stored.log ?? []), { what, hash: rec.hash, block: rec.block, at: new Date().toISOString() }] });
 
-  async function act(key: string, fn: () => Promise<void>) {
-    setBusy(key); setErr(null);
-    try { await fn(); } catch (e) { log.fail(); setErr(e); } finally { setBusy(null); }
-  }
+  /** Seal the file to `a`: if they have no card yet, invite them and wait. */
+  const share = async (raw: string, key: string) => {
+    const a = raw.trim();
+    setErr(null); setInvite(null); log.reset();
+    if (!owner || !keys) return;
+    if (!isQorAddress(a)) { setErr(coded("BAD_ADDRESS", "not a qor1 address")); return; }
+    if (a === file.owner) { setErr(new Error("That's your own address. You can already open this file.")); return; }
+    if (file.readers.includes(a) && !changed.includes(a)) { setErr(new Error("They can already open this file.")); return; }
+    setBusy(key);
+    try {
+      log.step("Looking for their card on QoreChain");
+      if (!(await hasCard(a))) {
+        log.reset();
+        setInvite(a);
+        if (!waiting.includes(a)) onChange({ waiting: [...(stored.waiting ?? []), a] });
+        setAddr("");
+        return;
+      }
+      const { r, rec } = await signAndRecord(log, wallet, "Sealing it to them", async () => ({ text: await work<string>("shareTo", { text: stored.text, owner, keys, addresses: [a] }) }));
+      const again = file.readers.includes(a);
+      onChange({
+        text: r.text, ...entry(again ? `Sealed ${who(a)} in again` : `Shared with ${who(a)}`, rec),
+        note: again ? `${who(a)} can open it again with their new key.` : `Shared with ${who(a)}.`,
+        removed: (stored.removed ?? []).filter((x) => x !== a), waiting: (stored.waiting ?? []).filter((x) => x !== a),
+      });
+      setChanged((c) => c.filter((x) => x !== a));
+      setAddr("");
+    } catch (e) {
+      log.fail();
+      setErr(e);
+    } finally {
+      setBusy(null);
+    }
+  };
 
-  const share = (address: string) => act(address === teammate ? "teammate" : "share", async () => {
-    if (!id) return;
-    log.reset();
-    if (file.readers.includes(address)) throw new Error("They can already read this file.");
-    log.step("Finding their key on QoreChain");
-    const reader = await fetchReader(address);
-    log.step("Sealing a new key to them");
-    const text = await work<string>("share", { text: stored.text, owner: id, readers: [reader] });
-    const g = parseCoffer(text);
-    log.step("Recording the share on QoreChain");
-    const txs = await record(id, { op: "share", fileId: g.id, epoch: g.epoch, version: g.version, added: [address], removed: [] }, (_t, h) => log.step("Fee topped up by the relayer", h));
-    log.done("Share recorded", txs[0]?.hash);
-    remember(g);
-    onChange({ text, note: `Shared with ${address === teammate ? "the demo teammate" : short(address, 6, 4)}.`, removed: (stored.removed ?? []).filter((a) => a !== address) });
-    setAddr("");
-  });
+  const remove = async (a: string, key: string) => {
+    if (!owner || !keys) return;
+    setBusy(key); setErr(null); setInvite(null); log.reset();
+    try {
+      const { r, rec } = await signAndRecord(log, wallet, "Sealing a new version without them",
+        () => work<{ text: string; rotate: string[] }>("revoke", { text: stored.text, owner, keys, addresses: [a] }));
+      onChange({ text: r.text, old: stored.text, ...entry(`Removed ${who(a)}`, rec), note: `Removed ${who(a)}. ${r.rotate.length === 1 ? "Change that value" : `Change all ${r.rotate.length} values`} at the provider.`, removed: [...new Set([...(stored.removed ?? []), a])] });
+      setOutcomes((o) => [...o, { kind: "revoke", rotate: r.rotate, who: who(a), ada: isAda(a), tx: rec.hash, block: rec.block }]);
+    } catch (e) {
+      log.fail();
+      setErr(e);
+    } finally {
+      setBusy(null);
+    }
+  };
 
-  const revoke = (address: string) => act(address === teammate ? "revoke" : `remove-${address}`, async () => {
-    if (!id) return;
-    log.reset();
-    log.step("Sealing the file again with a new key");
-    const r = await work<{ text: string; rotate: string[] }>("revoke", { text: stored.text, owner: id, addresses: [address] });
-    const g = parseCoffer(r.text);
-    log.step("Recording the revoke on QoreChain");
-    const txs = await record(id, { op: "revoke", fileId: g.id, epoch: g.epoch, version: g.version, added: [], removed: [address] }, (_t, h) => log.step("Fee topped up by the relayer", h));
-    log.done("Revoke recorded", txs[0]?.hash);
-    remember(g);
-    onChange({ text: r.text, old: stored.text, note: `Revoked. Rotate these ${r.rotate.length} keys.`, removed: [...new Set([...(stored.removed ?? []), address])] });
-    setOutcomes((o) => [...o, { kind: "revoke", rotate: r.rotate, who: name(address), tx: txs[0]?.hash }]);
-  });
+  const ask = async (text: string, label: "first" | "again" | "old") => {
+    setBusy(label); setErr(null);
+    try {
+      const answer = await api<TeammateAnswer>("/api/teammate/open", { body: { file: text } });
+      setOutcomes((o) => [...o, { kind: "ask", answer, label }]);
+    } catch (e) {
+      setErr(e);
+    } finally {
+      setBusy(null);
+    }
+  };
 
-  const ask = (text: string, label: string) => act(label, async () => {
-    const answer = await api<TeammateAnswer>("/api/teammate/open", { body: { file: text } });
-    setOutcomes((o) => [...o, { kind: "ask", answer, label }]);
-  });
+  const withAda = async (fn: (ada: string) => Promise<void>) => {
+    try { const a = teammate ?? await getTeammate(); setTeammate(a); await fn(a); } catch (e) { setErr(e); }
+  };
 
   const readers = [...file.readers].sort((a, b) => (a === file.owner ? -1 : b === file.owner ? 1 : 0));
   const removed = (stored.removed ?? []).filter((a) => !file.readers.includes(a));
-
-  const shared = file.readers.length > 1 || removed.length > 0;
+  const shared = file.readers.length > 1 || removed.length > 0 || waiting.length > 0;
+  const link = address ? inviteLink(address) : "";
   return (
     <div className="file">
       {!shared && <Flow at={3} />}
@@ -521,7 +750,10 @@ function FileDetail({ stored, onChange }: { stored: Stored; onChange: (patch: Pa
         </Sheet>
         <div className="file-status">
           <Result>{stored.note ?? "Sealed. Safe to commit."}</Result>
-          <button className="link" onClick={() => download(`${file.name}.coffer`, stored.text)}>Download {file.name}.coffer</button>
+          <span className="acts acts-tight">
+            {stored.tx && <a className="link" href={explorerTx(stored.tx)} target="_blank" rel="noreferrer">Recorded on QoreChain</a>}
+            <button className="link" onClick={() => download(`${file.name}.coffer`, stored.text)}>Download {file.name}.coffer</button>
+          </span>
         </div>
         <details className="raw">
           <summary>Details</summary>
@@ -529,23 +761,46 @@ function FileDetail({ stored, onChange }: { stored: Stored; onChange: (patch: Pa
             <div><dt>File id</dt><dd className="mono">{file.id}</dd></div>
             <div><dt>Epoch</dt><dd className="mono">{String(file.epoch)}</dd></div>
             <div><dt>Version</dt><dd className="mono">{String(file.version)}</dd></div>
-            {stored.tx && <div><dt>First record</dt><dd><TxLink hash={stored.tx} /></dd></div>}
           </dl>
+          <HeadNow fileId={file.id} epoch={file.epoch} />
+          {stored.tx && <RecordFacts hash={stored.tx} block={stored.block} />}
+          {(stored.log ?? []).length > 0 && (
+            <ol className="records">
+              {[...(stored.log ?? [])].reverse().map((h) => (
+                <li key={h.hash}>
+                  <span>{new Date(h.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span>
+                  <span>{h.what}</span>
+                  <span className="mono">{h.block !== undefined ? `block ${h.block}` : ""}</span>
+                  <TxLink hash={h.hash} label="view" />
+                </li>
+              ))}
+            </ol>
+          )}
           <Log lines={log.lines} />
-          <Records file={file} name={name} />
           <pre className="mono">{stored.text}</pre>
         </details>
       </section>
 
       <section className="file-sec" id="share" aria-labelledby="h-to">
         <h3 id="h-to" className="label">To</h3>
-        {!shared && <p className="next">Next: add a teammate's Coffer address below. They open the file with their own key, and you can remove them any time. No address yet? <InviteButton className="link" /></p>}
+        {!shared && <p className="next">Next: add a teammate by their QoreChain address. No teammate handy? Try it with Ada, our demo teammate, below.</p>}
         <ul className="to-list">
           {readers.map((a) => (
             <li key={a}>
-              <span className="to-name">{a === file.owner ? "You, owner" : name(a)}</span>
+              <span className="to-name">{a === file.owner ? "You, owner" : changed.includes(a) ? `${name(a)}, new key` : name(a)}</span>
               <Addr a={a} />
-              {a !== file.owner ? <button className="link" disabled={!!busy} onClick={() => void revoke(a)}>{busy === `remove-${a}` ? "Removing" : "Remove"}</button> : <span />}
+              {a === file.owner ? <span /> : changed.includes(a)
+                ? <button className="link" disabled={!!busy} onClick={() => void share(a, `again-${a}`)}>{busy === `again-${a}` ? "Sealing them in" : "Seal in again"}</button>
+                : <button className="link" disabled={!!busy} onClick={() => void remove(a, isAda(a) ? "remove-ada" : `remove-${a}`)}>{busy === `remove-${a}` || (isAda(a) && busy === "remove-ada") ? "Removing" : "Remove"}</button>}
+            </li>
+          ))}
+          {waiting.map((a) => (
+            <li key={a} className="to-waiting">
+              <span className="to-name">{arrived[a] ? "Ready to add" : "Invited, not set up yet"}</span>
+              <Addr a={a} />
+              {arrived[a]
+                ? <button className="link" disabled={!!busy} onClick={() => void share(a, `seal-${a}`)}>{busy === `seal-${a}` ? "Sealing them in" : "Seal them in"}</button>
+                : <CopyAction className="link" text={link} label="Copy invite link" done="Copied" />}
             </li>
           ))}
           {removed.map((a) => (
@@ -556,41 +811,39 @@ function FileDetail({ stored, onChange }: { stored: Stored; onChange: (patch: Pa
             </li>
           ))}
         </ul>
-        <form className="line-form" onSubmit={(e) => { e.preventDefault(); const a = addr.trim(); if (a) void share(a); }}>
-          <label htmlFor="addr" className="sr">Add someone by address</label>
-          <input id="addr" className="mono" value={addr} onChange={(e) => setAddr(e.target.value)} placeholder="Paste a teammate's Coffer address: qor1…" spellCheck={false} autoComplete="off" />
+        <form className="line-form" onSubmit={(e) => { e.preventDefault(); if (addr.trim()) void share(addr, "share"); }}>
+          <label htmlFor="addr" className="sr">Add someone by their QoreChain address</label>
+          <input id="addr" className="mono" value={addr} onChange={(e) => setAddr(e.target.value)} placeholder="Their QoreChain address: qor1…" spellCheck={false} autoComplete="off" />
           <button className="btn" disabled={!!busy || !addr.trim()}>{busy === "share" ? "Sharing" : "Share"}</button>
         </form>
-        <div className="mate-row">
-          <button className="btn-outline" disabled={!!busy || mateIn} onClick={async () => {
-            // never wait on the button: fetch the teammate's address on click if it hasn't arrived yet
-            try { const a = teammate ?? await getTeammate(); setTeammate(a); void share(a); } catch (e) { setErr(e); }
-          }}>
-            {busy === "teammate" ? "Sharing with the demo teammate" : mateIn ? "Demo teammate added" : "Add the demo teammate"}
-          </button>
-          <span className="muted small">A test teammate run by Coffer, so you can try sharing and revoking alone.</span>
-        </div>
-        {busy && <Progress lines={log.lines} />}
-        {err !== null && errCode(err) === "NO_KEM_KEY" ? (
-          <div className="problem invite">
-            <p><b>This address can't receive sealed files yet.</b> Sealing needs the reader's public sealing key, and a wallet address on its own has never put one on QoreChain. Send them an invite: they open Coffer once (free, about 30 seconds) and send you the address it gives them.</p>
-            <InviteButton />
+        {busy && busy !== "first" && busy !== "again" && busy !== "old" && <Progress lines={log.lines} />}
+        {invite && (
+          <div className="calm invite" role="status">
+            <p><b>This address hasn't opened Coffer yet.</b> Send them an invite: they connect QoreX and sign once, no fee. They stay on your list here, and you can seal them in as soon as they're done.</p>
+            <CopyAction text={link} label="Copy invite link" done="Invite link copied" />
           </div>
-        ) : err !== null && <Problem error={err} />}
+        )}
+        {err !== null && <Problem error={err} />}
+        {outcomes.some((o) => o.kind === "revoke" && !o.ada) && (
+          <div className="outcomes">
+            {outcomes.map((o, i) => (o.kind === "revoke" && !o.ada ? <OutcomeView key={i} o={o} /> : null))}
+          </div>
+        )}
       </section>
 
       <section className="file-sec" id="prove" aria-labelledby="h-prove">
-        <h3 id="h-prove" className="label">Prove it</h3>
-        <p className="muted">The demo teammate is a separate person on the Coffer server. They check the file against QoreChain like the CLI does, and report only the names they could read.</p>
+        <h3 id="h-prove" className="label">Prove it with Ada</h3>
+        <p className="muted">Ada is a demo teammate run by Coffer. She checks the file against QoreChain the way the CLI does, and tells you only the names she could read.</p>
         <div className="prove-acts">
-          <button className="btn-outline" disabled={!!busy || !mateIn} onClick={() => void ask(stored.text, "first")}>{busy === "first" ? "Asking" : "Ask the teammate"}</button>
-          <button className="btn-outline" disabled={!!busy || !mateIn} onClick={() => teammate && void revoke(teammate)}>{busy === "revoke" ? "Revoking" : "Revoke"}</button>
-          <button className="btn-outline" disabled={!!busy || !mateRevoked} onClick={() => void ask(stored.text, "again")}>{busy === "again" ? "Asking" : "Ask the teammate again"}</button>
-          <button className="btn-outline" disabled={!!busy || !mateRevoked} onClick={() => stored.old && void ask(stored.old, "old")}>{busy === "old" ? "Asking" : "Send the old copy to the teammate"}</button>
+          <button className="btn-outline" disabled={!!busy || mateIn} onClick={() => void withAda((a) => share(a, "ada"))}>{busy === "ada" ? "Sharing with Ada" : mateIn ? "Shared with Ada" : "Share with Ada"}</button>
+          <button className="btn-outline" disabled={!!busy || !mateIn} onClick={() => void ask(stored.text, "first")}>{busy === "first" ? "Asking Ada" : "Ask Ada to open it"}</button>
+          <button className="btn-outline" disabled={!!busy || !mateIn} onClick={() => void withAda((a) => remove(a, "remove-ada"))}>{busy === "remove-ada" ? "Removing Ada" : "Remove Ada"}</button>
+          <button className="btn-outline" disabled={!!busy || !mateRemoved} onClick={() => void ask(stored.text, "again")}>{busy === "again" ? "Asking Ada" : "Ask Ada again"}</button>
+          <button className="btn-outline" disabled={!!busy || !mateRemoved || !stored.old} onClick={() => stored.old && void ask(stored.old, "old")}>{busy === "old" ? "Sending" : "Send Ada the old copy"}</button>
         </div>
-        {!mateIn && !mateRevoked && <p className="muted small">Add the demo teammate above to start.</p>}
+        {!mateIn && !mateRemoved && <p className="muted small">Start by sharing with Ada.</p>}
         <div className="outcomes">
-          {outcomes.map((o, i) => <OutcomeView key={i} o={o} />)}
+          {outcomes.map((o, i) => (o.kind === "revoke" && !o.ada ? null : <OutcomeView key={i} o={o} />))}
         </div>
       </section>
     </div>
@@ -601,22 +854,22 @@ function OutcomeView({ o }: { o: Outcome }) {
   if (o.kind === "revoke") {
     return (
       <div className="outcome rotate">
-        <Stamp tone="ink">Revoked</Stamp>
-        <p>{o.who} can't read the new file. Rotate these {o.rotate.length} keys: they may have read them before.</p>
+        <Stamp tone="ink">Removed</Stamp>
+        <p>{o.who} can't open the new version. Change {o.rotate.length === 1 ? "this value" : `these ${o.rotate.length} values`} at the provider: {o.ada ? "she" : "they"} may have read {o.rotate.length === 1 ? "it" : "them"} before.</p>
         <Chips names={o.rotate} />
-        {o.tx && <details className="steps"><summary>Details</summary><p>Recorded on QoreChain: <TxLink hash={o.tx} /></p></details>}
+        <details className="steps"><summary>Details</summary><p>Recorded on QoreChain: <TxLink hash={o.tx} />{o.block !== undefined ? `, block ${o.block}` : ""}</p></details>
       </div>
     );
   }
   const a = o.answer;
-  const what = o.label === "old" ? "The old copy, sent to the teammate" : o.label === "again" ? "Asked again" : "Asked the teammate";
+  const what = o.label === "old" ? "The old copy, sent to Ada" : o.label === "again" ? "Asked Ada again" : "Asked Ada";
   return a.opened ? (
     <div className="outcome answer">
       <p className="label">{what}</p>
       <Stamp>Opened</Stamp>
-      <p>They read {a.keys.length} {a.keys.length === 1 ? "name" : "names"}. The server reports names only, never values.</p>
+      <p>Ada opened it and read {a.keys.length} {a.keys.length === 1 ? "name" : "names"}. The server reports names only, never values.</p>
       <Chips names={a.keys} />
-      <details className="steps"><summary>Details</summary><p className="mono">epoch {String(a.epoch)} · version {String(a.version)} · signatures checked on QoreChain</p></details>
+      <details className="steps"><summary>Details</summary><p className="mono">epoch {String(a.epoch)} · version {String(a.version)} · checked against QoreChain</p></details>
     </div>
   ) : (
     <div className="outcome answer">
@@ -625,26 +878,5 @@ function OutcomeView({ o }: { o: Outcome }) {
       <p>{(a.code && REFUSED[a.code]) ?? a.error}</p>
       <details className="steps"><summary>Details</summary><p className="mono">{a.code ? `${a.code}: ` : ""}{a.error}</p></details>
     </div>
-  );
-}
-
-function Records({ file, name }: { file: CofferFile; name: (a: string) => string }): ReactNode {
-  const [hist, setHist] = useState<GrantRecord[] | null>(null);
-  const [err, setErr] = useState(false);
-  useEffect(() => { setHist(null); grantHistory(file.owner, file.id).then(setHist).catch(() => setErr(true)); }, [file.owner, file.id, file.epoch]);
-  const OP: Record<string, string> = { create: "Sealed", share: "Shared", revoke: "Revoked" };
-  if (err) return <p className="muted small">QoreChain can't be reached right now.</p>;
-  if (!hist) return <p className="muted small">Reading the records…</p>;
-  return (
-    <ol className="records">
-      {hist.map((h) => (
-        <li key={h.hash}>
-          <span>{new Date(h.time).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span>
-          <span>{OP[h.op] ?? h.op}</span>
-          <span>{[...h.added.map((a) => `added ${name(a)}`), ...h.removed.map((a) => `removed ${name(a)}`)].join(", ")}</span>
-          <TxLink hash={h.hash} label="view" />
-        </li>
-      ))}
-    </ol>
   );
 }

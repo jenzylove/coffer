@@ -22,11 +22,11 @@ export function CopyButton({ text, label = "Copy" }: { text: string; label?: str
 
 function HeaderAddress() {
   const ident = useIdentityMaybe();
-  if (!ident?.id) return null;
+  if (!ident?.address) return null;
   return (
     <span className="head-addr">
-      <span className="mono addr-v" title={ident.id.address}>{short(ident.id.address, 8, 4)}</span>
-      <CopyButton text={ident.id.address} label="Copy" />
+      <span className="mono addr-v" title={ident.address}>{short(ident.address, 8, 4)}</span>
+      <CopyButton text={ident.address} label="Copy" />
     </span>
   );
 }

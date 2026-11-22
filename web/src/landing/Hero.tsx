@@ -18,7 +18,7 @@ const HOLD: Record<Phase, number> = { plain: 1900, to: 2500, sealed: 2400, ada: 
 const ORDER: Phase[] = ["plain", "to", "sealed", "ada", "sam"];
 const CAPTION: Record<Phase, string> = {
   plain: "Your .env in plain text. Anyone who sees it reads every key.",
-  to: "Add your teammates by their Coffer address. Their sealing key is already on QoreChain.",
+  to: "Add your teammates by their QoreChain address. Their card is already on QoreChain.",
   sealed: "Coffer seals every value to those addresses. Now it's safe to commit.",
   ada: "Ada is on the list, so Ada's own key opens it.",
   sam: "Remove Sam and the next version is sealed without Sam. Refused.",
@@ -90,7 +90,7 @@ export function Hero() {
       <div className="wrap hero-in">
         <div className="hero-copy">
           <h1 id="hero-title" className="h-display hero-title"><span className="nw">Commit your .env.</span> Only your team can read it.</h1>
-          <p className="hero-sub">Each teammate gets a QoreChain address from Coffer in one click. Add them by it and Coffer seals every value to them. Anyone else who opens the repo sees <span className="bar bar-sub" aria-label="a black bar" role="img" />. Remove someone and they can't open the next version.</p>
+          <p className="hero-sub">Add teammates by their QoreChain wallet address and Coffer seals every value to them. Anyone else who opens the repo sees <span className="bar bar-sub" aria-label="a black bar" role="img" />. Remove someone and they can't open the next version.</p>
           <div className="actions">
             <Link to="/app" className="btn">Seal a file</Link>
             <Link to="/#how" className="link">See how it works</Link>
@@ -126,7 +126,7 @@ export function Hero() {
             <span className="cap-ticks" aria-hidden>{ORDER.map((p, i) => <i key={p} className={i <= ORDER.indexOf(phase) ? "on" : ""} />)}</span>
             <p className="cap-t" key={phase}>{failed ? "The live demo stopped: this browser couldn't run the sealing code." : CAPTION[phase]}</p>
           </div>
-          <p className="note">Live in your browser: real ML-KEM-1024 keys for Ada and Sam, made fresh on this page.</p></>}
+          <p className="note">Live in your browser: real ML-KEM-1024 and X25519 keys for Ada and Sam, made fresh on this page.</p></>}
         </div>
       </div>
     </section>

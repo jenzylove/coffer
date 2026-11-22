@@ -1,0 +1,8 @@
+{
+  "network": "qorechain-diana",
+  "coffer": "0xe94094e3e67d0c9c37b478616e3f5240127f40c9",
+  "cofferDeployTx": "0x6538ffa60a4e6424080eaa11f74a9bf921275e551d6a550c52289551a60223cd",
+  "cofferDeployBlock": 10543637,
+  "poster": "qor1a9qjefnsudjc3ntur9epf0exn4wckq9cmz6229",
+  "posterEvm": "0xE9412Ca670e36588cD7C197214Bf269D5D8B00b8"
+}

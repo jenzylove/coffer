@@ -1,101 +1,111 @@
 // The app's chain steps, built only from src/core and src/chain (same as the CLI).
-import type { Identity } from "../../../src/core/identity.ts";
-import { CofferError, formatCoffer, type CofferFile } from "../../../src/core/vault.ts";
+// The Coffer server submits signed cards and changes to the Coffer contract and
+// pays the gas; it cannot forge either, because the contract checks the signature.
+import type { SealKeyPair } from "@qorechain/qoreseal";
+import type { RecipientCard } from "../../../src/core/card.ts";
 import { work } from "./crypto.ts";
-import type { Grant, GrantRecord, TxResult } from "../../../src/chain/qore.ts";
-import { accountStatus, fetchPqKeys, grantHistory, recordGrant } from "./chain.ts";
-import { api, net, sleep } from "./net.ts";
+import { status } from "./chain.ts";
+import { api, coded, sentence, sleep } from "./net.ts";
+import type { OwnerRef } from "./identity.tsx";
 
-/** About what one grant record costs (168,960 gas at 0.1 uqor), with headroom. */
-export const GRANT_FEE_UQOR = 20_000n;
-/** What the two setup transactions need (the CLI's threshold). */
+/** What the two setup transactions of a browser key need (the CLI's threshold). */
 export const SETUP_UQOR = 60_000n;
 
 export interface DripResult { hash: string; uqor: number | string }
+export interface Recorded { hash: string; block: number }
 
 /** Ask the relayer for test QOR, then wait until the balance shows it. */
-export async function dripAndWait(id: Identity, need: bigint, onNote?: (s: string, hash?: string) => void): Promise<void> {
-  const r = await api<DripResult>("/api/drip", { body: { address: id.address } });
-  onNote?.("The Coffer relayer sent test QOR to your address", r.hash);
+export async function dripAndWait(address: string, need: bigint, onNote?: (s: string, hash?: string) => void): Promise<void> {
+  const r = await api<DripResult>("/api/drip", { body: { address } });
+  onNote?.("The Coffer relayer sent test QOR to this key", r.hash);
   for (let i = 0; i < 40; i++) {
-    const st = await accountStatus(id.address, id.sealKeys.mlkemPublicKey);
-    if (st.uqor >= need) return;
+    const st = await status(address, null).catch(() => null);
+    if (st && st.uqor >= need) return;
     await sleep(2000);
   }
-  throw new Error("The relayer's transfer has not arrived after 80 seconds. Check your balance and try again.");
+  throw new Error("The relayer's transfer has not arrived after 80 seconds. Try again in a moment.");
 }
 
-/** Make sure there is enough for one more record; ask the relayer once if not. */
-export async function ensureFee(id: Identity, onNote?: (s: string, hash?: string) => void): Promise<void> {
-  const st = await accountStatus(id.address, id.sealKeys.mlkemPublicKey);
-  if (st.uqor >= GRANT_FEE_UQOR) return;
+
+/** Record the owner's signed change on QoreChain. Called before the new version is kept, so no unrecorded copy exists. */
+export async function recordHead(text: string): Promise<Recorded> {
   try {
-    await dripAndWait(id, GRANT_FEE_UQOR, onNote);
+    return await api<Recorded>("/api/head", { body: { file: text } });
   } catch (e) {
-    throw new Error(`Your address has ${Number(st.uqor) / 1e6} test QOR, not enough for the on chain record (about 0.017). The relayer said: ${(e as Error).message}`);
+    throw coded("NOT_RECORDED", sentence((e as Error).message));
   }
 }
 
-export async function record(id: Identity, g: Grant, onNote?: (s: string, hash?: string) => void): Promise<TxResult[]> {
-  await ensureFee(id, onNote);
-  // right after a commit the REST node can still report the old account sequence; wait and retry
-  for (let i = 0; ; i++) {
-    try { return await recordGrant(id, g); }
-    catch (e) {
-      if (i >= 4 || !/sequence mismatch/i.test((e as Error).message)) throw e;
-      await sleep(2500);
-    }
+/** Sign this account's card (one wallet approval) and have the server put it in the Coffer contract. */
+export async function publishCard(owner: OwnerRef, keys: SealKeyPair, onStep: (s: string, hash?: string) => void): Promise<Recorded> {
+  onStep(owner.kind === "wallet" ? "Approve the card in QoreX" : "Signing your card");
+  const signed = await work<{ card: RecipientCard; mlkemKey: string }>("signCard", { owner, keys });
+  onStep("Putting your card on QoreChain");
+  let r: Recorded;
+  try {
+    r = await api<Recorded>("/api/card", { body: signed });
+  } catch (e) {
+    throw coded("CARD_REFUSED", sentence((e as Error).message));
   }
+  onStep("Card recorded on QoreChain", r.hash);
+  return r;
 }
 
-// local high-water mark, like the CLI's ~/.coffer/seen.json (metadata only, no secrets)
-type Seen = Record<string, { epoch: string; version: string }>;
-const SEEN = "coffer.seen";
-function seen(): Seen {
-  try { return JSON.parse(localStorage.getItem(SEEN) ?? "{}"); } catch { return {}; }
-}
-export function remember(f: CofferFile) {
-  const s = seen();
-  const old = s[f.id];
-  if (old && (BigInt(old.epoch) > f.epoch || (BigInt(old.epoch) === f.epoch && BigInt(old.version) > f.version))) return;
-  s[f.id] = { epoch: f.epoch.toString(), version: f.version.toString() };
-  try { localStorage.setItem(SEEN, JSON.stringify(s)); } catch { /* storage blocked */ }
-}
+// ---- files kept in this browser (sealed text only: safe to store) ------------
 
-export interface CheckResult { history: GrantRecord[]; top: bigint }
-
-/** The CLI's checkFile: signatures against chain keys, the chain's latest epoch, this browser's high-water mark. */
-export async function checkFile(f: CofferFile): Promise<CheckResult> {
-  const keys = await fetchPqKeys([f.owner, f.writer]);
-  await work("verify", { text: formatCoffer(f), pqKeys: keys });
-  const history = await grantHistory(f.owner, f.id);
-  const top = history.reduce((m, g) => (g.epoch > m ? g.epoch : m), 0n);
-  if (f.epoch < top) throw new CofferError("ROLLBACK", `this file is epoch ${f.epoch} but its owner announced epoch ${top} on chain: it is an old copy (someone may have restored a version a removed reader can still open)`);
-  if (f.epoch > top) throw new CofferError("UNRECORDED", `this file is epoch ${f.epoch} but its owner's latest record on chain is ${top === 0n ? "missing" : `epoch ${top}`}`);
-  const s = seen()[f.id];
-  if (s && (f.epoch < BigInt(s.epoch) || (f.epoch === BigInt(s.epoch) && f.version < BigInt(s.version)))) {
-    throw new CofferError("ROLLBACK", `this browser already saw epoch ${s.epoch} version ${s.version} of this file; this copy is older (epoch ${f.epoch} version ${f.version})`);
-  }
-  return { history, top };
+export interface LogEntry { what: string; hash: string; block?: number; at: string }
+export interface Stored {
+  text: string;
+  /** The version before the last removal, for "Send Ada the old copy". */
+  old?: string;
+  tx?: string;
+  block?: number;
+  changed: string;
+  note?: string;
+  removed?: string[];
+  /** Addresses we invited that have not signed a card yet. */
+  waiting?: string[];
+  /** Changes recorded from this browser. */
+  log?: LogEntry[];
 }
+const FILES = "coffer.files.v2";
+export function loadFiles(): Stored[] {
+  try { return (JSON.parse(localStorage.getItem(FILES) ?? "null") as Stored[] | null) ?? []; } catch { return []; }
+}
+export function saveFiles(list: Stored[]) { try { localStorage.setItem(FILES, JSON.stringify(list)); } catch { /* storage blocked */ } }
 
 /** Plain words for the error codes a person can hit. */
 export function explain(code: string | undefined, message: string): string {
   switch (code) {
+    case "SIGN_REJECTED": return "You closed QoreX without signing. Nothing changed.";
+    case "SIGN_TIMEOUT": return "QoreX didn't answer, so nothing changed. Try again.";
+    case "WALLET_GONE": return "QoreX isn't connected right now. Connect it and try again.";
+    case "WALLET_ERROR": return `QoreX couldn't sign: ${message}`;
+    case "NOT_RECORDED": return `QoreChain didn't record it, so nothing changed. ${message}`;
+    case "CARD_REFUSED":
+      if (/no proven ML-DSA-87 key/i.test(message)) return "QoreChain didn't take the card: this wallet's quantum safe key was registered without a proof, so the contract can't trust it yet.";
+      if (/no ML-DSA-87 key/i.test(message)) return "QoreChain didn't take the card: this wallet has no quantum safe key on chain yet. Send any amount once from QoreX, then try again.";
+      return `QoreChain didn't take the card. ${message}`;
+    case "NO_CONTRACT": return "Recording on QoreChain isn't set up on this server yet.";
+    case "NO_CARD": return "This address hasn't opened Coffer yet.";
+    case "CARD_INVALID": return "The card on QoreChain for this address doesn't check out, so Coffer won't seal to it.";
     case "NOT_A_READER": return "This address isn't on the list for this file.";
     case "BAD_SIGNATURE": return "Someone changed this file by hand, so it can't be trusted.";
-    case "ROLLBACK": return "This is an old copy. A newer version exists.";
-    case "UNRECORDED": return "QoreChain has no record of this version, so it wasn't made by Coffer or its owner still needs to record it.";
-    case "UNKNOWN_KEY": return "Whoever signed this file hasn't set up Coffer, so it can't be checked.";
+    case "STALE": return "This is an old copy. QoreChain has a newer one, so someone removed since then might still be in it.";
+    case "UNRECORDED": return "QoreChain has no record of this version, so Coffer can't tell if it's the latest copy.";
+    case "OWNER_MISMATCH": return "QoreChain says this file belongs to someone else.";
+    case "FORKED": return "QoreChain has a different reader list for this version, so it won't be opened.";
+    case "OLD_FORMAT": return "This file uses Coffer's first format. Ask its owner to seal it again.";
+    case "UNKNOWN_KEY": return "Whoever signed this file has no signing key on QoreChain, so it can't be checked.";
     case "WRITER_NOT_READER": return "The last person to change this file isn't on its list.";
+    case "WRONG_CHAIN": return "This file is for another QoreChain network.";
     case "BAD_FORMAT": return "This isn't a Coffer file.";
-    case "NO_KEM_KEY": return "This address can't receive sealed files yet: it has no sealing key on QoreChain. They get one by opening Coffer once.";
     case "BAD_ADDRESS": return "That doesn't look like a QoreChain address. It starts with qor1.";
-    case "NOT_OWNER": return "Only the person who sealed this file can change who reads it.";
+    case "NOT_OWNER": return "Only the person who sealed this file can change who opens it.";
+    case "EVM_ERROR": case "REST_ERROR": return "QoreChain can't be reached right now. Try again in a moment.";
     case "TX_REFUSED": case "TX_FAILED": return "QoreChain didn't accept the transaction. Try again in a moment.";
     case "TX_TIMEOUT": return "QoreChain is slow to confirm. Try again in a minute.";
-    case "REST_ERROR": return "QoreChain can't be reached right now. Try again in a moment.";
-    case "NO_FUNDS": return "Your address has no test QOR yet.";
+    case "NO_FUNDS": return "This key has no test QOR yet.";
     default: return message;
   }
 }

@@ -15,3 +15,8 @@ web/dist/
 coverage/
 *.log
 .DS_Store
+
+# contracts: forge build output and the vendored forge-std
+contracts/out/
+contracts/cache/
+contracts/lib/
