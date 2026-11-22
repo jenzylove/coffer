@@ -10,18 +10,21 @@ import { addressFromBytes, parseAddress } from "@qorechain/qoresign";
 import { fetchPqKeyStatus } from "@qorechain/qoresign/network";
 import { isQoreSealError } from "@qorechain/qoreseal";
 import { readerFromCard, type RecipientCard } from "../core/card.ts";
-import { CofferError, type ChainHead, type CofferFile, type Reader, headArgs } from "../core/vault.ts";
+import { CofferError, type ChainHead, type CofferFile, type Reader, formatCoffer, headArgs } from "../core/vault.ts";
 
 export const COFFER_ABI = parseAbi([
   "function chainId() view returns (string)",
   "function cards(address) view returns (bytes32 mlkemSha3, bytes32 x25519, bytes32 issuedAt, uint64 height)",
   "function heads(bytes16) view returns (address owner, uint64 epoch, uint64 version, uint64 height, bytes32 access, bytes32 data)",
   "function setCard(address account, bytes32 mlkemSha3, bytes32 x25519, string issuedAt, bytes pqSig, bytes mlkemKey, bytes card)",
-  "function setHead(bytes16 file, address owner, uint64 epoch, uint64 version, bytes32 access, bytes32 data, string note, bytes pqSig)",
+  "struct Change { bytes16 file; address owner; uint64 epoch; uint64 version; bytes32 access; bytes32 data; string name; address[] readers; }",
+  "function setHead(Change c, bytes sealedFile, bytes pqSig)",
+  "function changeText(Change c) view returns (bytes)",
+  "function filesOf(address account) view returns (bytes16[])",
+  "function site() view returns (string)",
   "function cardText(address account, bytes32 mlkemSha3, bytes32 x25519, string issuedAt) view returns (bytes)",
-  "function changeText(bytes16 file, uint64 epoch, uint64 version, bytes32 access, bytes32 data, string note) pure returns (bytes)",
   "event CardSet(address indexed account, bytes32 mlkemSha3, bytes32 x25519, string issuedAt, bytes mlkemKey, bytes card)",
-  "event HeadSet(bytes16 indexed file, address indexed owner, uint64 epoch, uint64 version, bytes32 access, bytes32 data, string note)",
+  "event HeadSet(bytes16 indexed file, address indexed owner, uint64 epoch, uint64 version, bytes32 access, bytes32 data, string name, bytes sealedFile)",
   "error NoProvenKey(address account)",
   "error BadSignature()",
   "error BadIssuedAt()",
@@ -29,7 +32,9 @@ export const COFFER_ABI = parseAbi([
   "error BadKeyLength()",
   "error NotOwner(address owner)",
   "error StaleEpoch(uint64 current)",
-  "error NoteTooLong()",
+  "error BadName()",
+  "error BadReaders()",
+  "error BadFile()",
   "error PrecompileInactive()",
 ]);
 
@@ -60,10 +65,11 @@ export async function rpc<T>(url: string, method: string, params: unknown[]): Pr
   return b.result as T;
 }
 
-async function call<F extends "cards" | "heads">(net: EvmNetwork, functionName: F, args: readonly unknown[]) {
+async function call<F extends "cards" | "heads" | "filesOf">(net: EvmNetwork, functionName: F, args: readonly unknown[]) {
   const data = encodeFunctionData({ abi: COFFER_ABI, functionName, args } as never);
   const out = await rpc<Hex>(net.evm, "eth_call", [{ to: net.coffer, data }, "latest"]);
   if (!out || out === "0x") throw new CofferError("EVM_ERROR", "the Coffer contract did not answer (wrong network or address)");
+  // several outputs decode to an array of them; filesOf's single output decodes to the id array itself
   return decodeFunctionResult({ abi: COFFER_ABI, functionName, data: out } as never) as unknown as readonly unknown[];
 }
 
@@ -133,14 +139,39 @@ export async function readHead(net: EvmNetwork, fileId: string): Promise<ChainHe
   return { owner: qorAddress(owner), epoch, version, access: hex32(access), data: hex32(data), height: Number(height) };
 }
 
-/** The arguments for setHead, from the owner's signed change in the file. */
+/** The arguments for setHead: the owner's signed change, and the sealed file it delivers. */
 export function headCall(f: CofferFile) {
   const h = headArgs(f);
   if (!h.pqSig) throw new CofferError("BAD_SIGNATURE", "the owner's change has no ML-DSA-87 signature");
-  return {
-    functionName: "setHead" as const,
-    args: [`0x${h.file}` as Hex, evmAddress(h.owner), h.epoch, h.version, `0x${h.access}` as Hex, `0x${h.data}` as Hex, h.note, b64ToHex(h.pqSig)] as const,
+  const change = {
+    file: `0x${h.file}` as Hex, owner: evmAddress(h.owner), epoch: h.epoch, version: h.version,
+    access: `0x${h.access}` as Hex, data: `0x${h.data}` as Hex, name: h.name, readers: h.readers.map(evmAddress),
   };
+  const sealed = bytesToHex(new TextEncoder().encode(formatCoffer(f)));
+  return { functionName: "setHead" as const, args: [change, sealed, b64ToHex(h.pqSig)] as const };
+}
+
+/** Every file id this address was ever a reader of (newest last), from the contract. */
+export async function filesOf(net: EvmNetwork, address: string): Promise<string[]> {
+  const ids = (await call(net, "filesOf", [evmAddress(address)])) as unknown as Hex[];
+  return [...ids].map((x) => x.slice(2).toLowerCase());
+}
+
+/** A file as delivered on chain: the sealed text of its latest change. */
+export interface DeliveredFile { id: string; name: string; owner: string; epoch: bigint; version: bigint; height: number; text: string }
+
+/** The newest sealed copy of a file, read from its HeadSet event. null if it was never recorded. */
+export async function readFile(net: EvmNetwork, fileId: string): Promise<DeliveredFile | null> {
+  const head = await readHead(net, fileId);
+  if (!head) return null;
+  const topics = encodeEventTopics({ abi: COFFER_ABI, eventName: "HeadSet", args: { file: `0x${fileId}` as Hex } });
+  const logs = await rpc<{ data: Hex; topics: Hex[] }[]>(net.evm, "eth_getLogs", [{ address: net.coffer, fromBlock: toHex(head.height), toBlock: toHex(head.height), topics }]);
+  for (const log of logs.reverse()) {
+    const ev = decodeEventLog({ abi: COFFER_ABI, eventName: "HeadSet", data: log.data, topics: log.topics as [Hex, ...Hex[]] });
+    if (ev.args.epoch !== head.epoch) continue;
+    return { id: fileId, name: ev.args.name, owner: head.owner, epoch: head.epoch, version: ev.args.version, height: head.height, text: new TextDecoder().decode(hexToBytes(ev.args.sealedFile)) };
+  }
+  throw new CofferError("EVM_ERROR", "the file's record could not be read back from the chain");
 }
 
 /** A contract refusal in plain words, or null if `data` is not one of ours. */
@@ -156,7 +187,9 @@ export function refusalText(data: Hex | undefined): string | null {
       case "BadKeyLength": return "the encryption key has the wrong length";
       case "NotOwner": return `this file belongs to ${qorAddress(e.args![0] as Hex)}`;
       case "StaleEpoch": return `QoreChain already has a newer change of this file (epoch ${e.args![0]})`;
-      case "NoteTooLong": return "the note is too long";
+      case "BadName": return "a file name must be 1 to 64 characters on one line";
+      case "BadReaders": return "the reader list is not in the form the contract needs";
+      case "BadFile": return "the sealed file is empty or larger than 64 KB";
       case "PrecompileInactive": return "QoreChain's post-quantum precompiles are not active on this network";
     }
   } catch { /* not ours */ }

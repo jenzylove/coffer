@@ -16,6 +16,7 @@ import {
 import type { SealKeyPair } from "@qorechain/qoreseal";
 import { signMessage, verifyMessage } from "@qorechain/qoresign";
 import type { MessageSignature } from "@qorechain/qoresign";
+import { parseAddress } from "@qorechain/qoresign";
 import { sha3_256 } from "@noble/hashes/sha3.js";
 
 export const FORMAT_VERSION = 2;
@@ -49,13 +50,15 @@ export interface Reader {
   x25519PublicKey: Uint8Array;
 }
 
-/** The owner's signed change: who can read (access hash), at which epoch, and the contents then. */
+/**
+ * The owner's signed change: who can read (access hash and the reader list,
+ * in plain words), at which epoch, and the contents then. The signed text is
+ * rebuilt from the file itself (changeText), so it cannot disagree with it.
+ */
 export interface Change {
   version: bigint;
   /** Hex SHA3-256 of the sealed data at that version. */
   data: string;
-  /** Plain text for the person signing (file name, readers). Signed, not checked by the chain. */
-  note: string;
   sig: MessageSignature;
 }
 
@@ -128,22 +131,27 @@ export function accessBytes(f: Pick<CofferFile, "v" | "id" | "chainId" | "name" 
 export const accessHash = (f: Parameters<typeof accessBytes>[0]) => sha3hex(accessBytes(f));
 export const dataHash = (data: Uint8Array) => sha3hex(data);
 
-/** Byte for byte the text Coffer.sol's changeText builds. */
-export function changeText(a: { id: string; epoch: bigint; version: bigint; access: string; data: string; note: string }): string {
-  return `Coffer change v1\nFile: ${a.id}\nEpoch: ${a.epoch}\nVersion: ${a.version}\nAccess: ${a.access}\nData: ${a.data}\n${a.note}`;
+/** Readers in ascending address order (the order Coffer.sol requires and prints). */
+export function sortByAddress(readers: string[]): string[] {
+  const key = (a: string) => hex(parseAddress(a).bytes);
+  return [...new Set(readers)].sort((x, y) => (key(x) < key(y) ? -1 : key(x) > key(y) ? 1 : 0));
+}
+
+/** 1 to 64 printable characters, no line breaks (the contract refuses anything else). */
+export function checkName(name: string): string {
+  const b = enc.encode(name);
+  if (b.length === 0 || b.length > 64 || [...b].some((c) => c < 0x20 || c === 0x7f)) throw new CofferError("BAD_NAME", "a file name must be 1 to 64 characters on one line");
+  return name;
+}
+
+/** Byte for byte the text Coffer.sol's changeText builds: what the owner reads in the wallet and signs. */
+export function changeText(a: { id: string; epoch: bigint; version: bigint; access: string; data: string; name: string; readers: string[] }): string {
+  return `Coffer change v1\nFile: ${a.id}\nEpoch: ${a.epoch}\nVersion: ${a.version}\nAccess: ${a.access}\nData: ${a.data}` +
+    `\nName: ${a.name}\nCan open it: ${sortByAddress(a.readers).join(", ")}\nSign this only on ${SITE}.`;
 }
 
 export function writeText(a: { id: string; epoch: bigint; version: bigint; access: string; data: string; note: string }): string {
   return `Coffer write v1\nFile: ${a.id}\nEpoch: ${a.epoch}\nVersion: ${a.version}\nAccess: ${a.access}\nData: ${a.data}\n${a.note}`;
-}
-
-/** What the owner reads in the wallet before approving a change. */
-export function ownerNote(name: string, owner: string, readers: string[]): string {
-  const others = readers.filter((r) => r !== owner).sort();
-  const shown = others.slice(0, 12);
-  const more = others.length > shown.length ? `, and ${others.length - shown.length} more` : "";
-  const who = others.length ? `${shown.join(", ")}${more}` : "nobody else yet";
-  return `Name: ${name}\nOwner: ${owner}\nCan open it besides you: ${who}\nSign this only on ${SITE}.`;
 }
 
 export function writerNote(name: string): string {
@@ -191,15 +199,15 @@ async function build(
   const data = sealBatch({ epochKey: mgr.currentKey, context: context(base), batchIndex: version, data: plaintext }).blob;
   const access = accessHash(head);
   const dh = dataHash(data);
-  const note = ownerNote(base.name, base.owner, head.readers);
-  const sig = await owner.sign(base.chainId, enc.encode(changeText({ id: base.id, epoch: head.epoch, version, access, data: dh, note })));
-  return { ...head, change: { version, data: dh, note, sig }, version, writer: base.owner, data };
+  const sig = await owner.sign(base.chainId, enc.encode(changeText({ id: base.id, epoch: head.epoch, version, access, data: dh, name: base.name, readers: head.readers })));
+  return { ...head, change: { version, data: dh, sig }, version, writer: base.owner, data };
 }
 
 /** A new sealed file. The owner is the first reader; more readers can be passed at once. */
 export async function createCoffer(args: {
   chainId: string; name: string; owner: Signer; ownerKeys: Omit<Reader, "address">; readers?: Reader[]; plaintext: Uint8Array;
 }): Promise<CofferFile> {
+  checkName(args.name);
   const members: Members = { [args.owner.address]: { mlkemPublicKey: args.ownerKeys.mlkemPublicKey, x25519PublicKey: args.ownerKeys.x25519PublicKey } };
   for (const r of args.readers ?? []) members[r.address] = { mlkemPublicKey: r.mlkemPublicKey, x25519PublicKey: r.x25519PublicKey };
   const mgr = new EpochKeyManager({ chainId: args.chainId, purpose: PURPOSE_EPOCH, mode: "hybrid", members });
@@ -292,7 +300,7 @@ export function verifyCoffer(f: CofferFile, pqKeys: Record<string, Uint8Array>):
   };
   if (!f.readers.includes(f.owner)) throw new CofferError("OWNER_NOT_MEMBER", "the owner is not a reader of this file");
   const access = accessHash(f);
-  check(f.owner, changeText({ id: f.id, epoch: f.epoch, version: f.change.version, access, data: f.change.data, note: f.change.note }), f.change.sig, "owner's");
+  check(f.owner, changeText({ id: f.id, epoch: f.epoch, version: f.change.version, access, data: f.change.data, name: f.name, readers: f.readers }), f.change.sig, "owner's");
   if (!f.write) {
     if (f.version !== f.change.version || dataHash(f.data) !== f.change.data || f.writer !== f.owner) {
       throw new CofferError("BAD_SIGNATURE", "the contents are not the ones the owner signed: this file was changed by someone else");
@@ -321,11 +329,12 @@ export function checkHead(f: CofferFile, head: ChainHead | null): void {
   if (head.access !== accessHash(f)) throw new CofferError("FORKED", "QoreChain has a different reader list for this version of the file");
 }
 
-/** What to send to the contract's setHead for the file's current change. */
+/** What to send to the contract's setHead for the file's current change (the sealed file goes with it). */
 export function headArgs(f: CofferFile) {
   return {
     file: f.id, owner: f.owner, epoch: f.epoch, version: f.change.version,
-    access: accessHash(f), data: f.change.data, note: f.change.note, pqSig: f.change.sig.pq?.signature ?? "",
+    access: accessHash(f), data: f.change.data, name: f.name, readers: sortByAddress(f.readers),
+    pqSig: f.change.sig.pq?.signature ?? "",
   };
 }
 
@@ -374,7 +383,7 @@ export function parseCoffer(text: string): CofferFile {
     const c = jsonParse(need("change"));
     const w = need("write");
     const wr = w === "-" ? undefined : jsonParse(w);
-    const change: Change = { version: BigInt(c.version), data: String(c.data), note: String(c.note), sig: c.sig };
+    const change: Change = { version: BigInt(c.version), data: String(c.data), sig: c.sig };
     if (!/^[0-9a-f]{64}$/.test(change.data)) throw new Error("bad data hash");
     return {
       v, id: need("id"), chainId: need("chain"), name: need("name"), owner: need("owner"), epoch: BigInt(need("epoch")),

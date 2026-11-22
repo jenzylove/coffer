@@ -23,10 +23,26 @@ contract Coffer {
     address internal constant VERIFY = 0x0000000000000000000000000000000000000a01;
     address internal constant STATUS = 0x0000000000000000000000000000000000000a02;
     uint256 internal constant MLKEM_1024_PUBLIC_KEY_LENGTH = 1568;
-    uint256 internal constant MAX_NOTE = 1024;
+    uint256 internal constant MAX_NAME = 64;
+    uint256 internal constant MAX_READERS = 64;
+    uint256 internal constant MAX_FILE = 65536;
 
     /// The Cosmos chain id the signatures are bound to, e.g. "qorechain-diana".
     string public chainId;
+    /// The site named in every change text ("Sign this only on <site>.").
+    string public site;
+
+    /// One change of who can read a file, as the owner signed it.
+    struct Change {
+        bytes16 file;
+        address owner;
+        uint64 epoch;
+        uint64 version;
+        bytes32 access;
+        bytes32 data;
+        string name;
+        address[] readers; // every reader, the owner included, in ascending address order
+    }
 
     struct Card {
         bytes32 mlkemSha3; // SHA3-256 of the ML-KEM-1024 public key
@@ -46,12 +62,23 @@ contract Coffer {
 
     mapping(address => Card) public cards;
     mapping(bytes16 => Head) public heads;
+    /// Every file an account was ever a reader of (owners included), oldest first.
+    mapping(address => bytes16[]) internal _files;
+    mapping(address => mapping(bytes16 => bool)) public listed;
 
     event CardSet(
         address indexed account, bytes32 mlkemSha3, bytes32 x25519, string issuedAt, bytes mlkemKey, bytes card
     );
+    /// `sealedFile` is the whole .env.coffer after the change: readers fetch it from here.
     event HeadSet(
-        bytes16 indexed file, address indexed owner, uint64 epoch, uint64 version, bytes32 access, bytes32 data, string note
+        bytes16 indexed file,
+        address indexed owner,
+        uint64 epoch,
+        uint64 version,
+        bytes32 access,
+        bytes32 data,
+        string name,
+        bytes sealedFile
     );
 
     error NoProvenKey(address account);
@@ -61,11 +88,19 @@ contract Coffer {
     error BadKeyLength();
     error NotOwner(address owner);
     error StaleEpoch(uint64 current);
-    error NoteTooLong();
+    error BadName();
+    error BadReaders();
+    error BadFile();
     error PrecompileInactive();
 
-    constructor(string memory chainId_) {
+    constructor(string memory chainId_, string memory site_) {
         chainId = chainId_;
+        site = site_;
+    }
+
+    /// The files an account can find: shared with it now or before (it may have been removed since).
+    function filesOf(address account) external view returns (bytes16[] memory) {
+        return _files[account];
     }
 
     // ---- cards ---------------------------------------------------------------
@@ -113,51 +148,74 @@ contract Coffer {
 
     // ---- heads ---------------------------------------------------------------
 
-    /// Record a change of who can read `file`, signed by its owner. The first
-    /// head binds the file to its owner; every later one must come from the
-    /// same owner with a higher epoch.
-    function setHead(
-        bytes16 file,
-        address owner,
-        uint64 epoch,
-        uint64 version,
-        bytes32 access,
-        bytes32 data,
-        string calldata note,
-        bytes calldata pqSig
-    ) external {
-        if (bytes(note).length > MAX_NOTE) revert NoteTooLong();
-        Head memory h = heads[file];
+    /// Record a change of who can read a file, signed by its owner, and deliver
+    /// the sealed file to its readers. The first head binds the file to its
+    /// owner; every later one must come from the same owner with a higher epoch.
+    /// The reader list is part of the signed text, so the list each reader finds
+    /// the file under is exactly the one the owner approved.
+    function setHead(Change calldata c, bytes calldata sealedFile, bytes calldata pqSig) external {
+        if (sealedFile.length == 0 || sealedFile.length > MAX_FILE) revert BadFile();
+        Head memory h = heads[c.file];
         if (h.owner != address(0)) {
-            if (h.owner != owner) revert NotOwner(h.owner);
-            if (epoch <= h.epoch) revert StaleEpoch(h.epoch);
+            if (h.owner != c.owner) revert NotOwner(h.owner);
+            if (c.epoch <= h.epoch) revert StaleEpoch(h.epoch);
         }
-        _verify(owner, changeText(file, epoch, version, access, data, note), pqSig);
-        heads[file] = Head(owner, epoch, version, uint64(block.number), access, data);
-        emit HeadSet(file, owner, epoch, version, access, data, note);
+        _verify(c.owner, changeText(c), pqSig);
+        heads[c.file] = Head(c.owner, c.epoch, c.version, uint64(block.number), c.access, c.data);
+        for (uint256 i; i < c.readers.length; ++i) {
+            address r = c.readers[i];
+            if (!listed[r][c.file]) {
+                listed[r][c.file] = true;
+                _files[r].push(c.file);
+            }
+        }
+        emit HeadSet(c.file, c.owner, c.epoch, c.version, c.access, c.data, c.name, sealedFile);
     }
 
-    /// The exact text an owner signs for a change. The note (file name, readers)
-    /// is for the person signing; the lines before it are what the chain checks.
-    function changeText(bytes16 file, uint64 epoch, uint64 version, bytes32 access, bytes32 data, string calldata note)
-        public
-        pure
-        returns (bytes memory)
-    {
+    /// The exact text an owner signs for a change: what the chain checks, then
+    /// the file name and every reader in plain qor1 form, for the person signing.
+    function changeText(Change calldata c) public view returns (bytes memory) {
         return abi.encodePacked(
-            "Coffer change v1\nFile: ",
-            _hex(abi.encodePacked(file)),
-            "\nEpoch: ",
-            _dec(epoch),
-            "\nVersion: ",
-            _dec(version),
-            "\nAccess: ",
-            _hex(abi.encodePacked(access)),
-            "\nData: ",
-            _hex(abi.encodePacked(data)),
-            "\n",
-            note
+            abi.encodePacked(
+                "Coffer change v1\nFile: ",
+                _hex(abi.encodePacked(c.file)),
+                "\nEpoch: ",
+                _dec(c.epoch),
+                "\nVersion: ",
+                _dec(c.version),
+                "\nAccess: ",
+                _hex(abi.encodePacked(c.access)),
+                "\nData: ",
+                _hex(abi.encodePacked(c.data))
+            ),
+            "\nName: ",
+            _name(c.name),
+            "\nCan open it: ",
+            _readers(c.readers, c.owner),
+            "\nSign this only on ",
+            site,
+            "."
         );
+    }
+
+    /// 1 to 64 printable bytes, no line breaks, so the text cannot be read two ways.
+    function _name(string calldata s) internal pure returns (string calldata) {
+        bytes calldata b = bytes(s);
+        if (b.length == 0 || b.length > MAX_NAME) revert BadName();
+        for (uint256 i; i < b.length; ++i) if (uint8(b[i]) < 0x20 || uint8(b[i]) == 0x7f) revert BadName();
+        return s;
+    }
+
+    /// "qor1…, qor1…" in ascending address order; the owner must be one of them.
+    function _readers(address[] calldata rs, address owner) internal pure returns (bytes memory out) {
+        if (rs.length == 0 || rs.length > MAX_READERS) revert BadReaders();
+        bool hasOwner;
+        for (uint256 i; i < rs.length; ++i) {
+            if (i > 0 && uint160(rs[i]) <= uint160(rs[i - 1])) revert BadReaders();
+            if (rs[i] == owner) hasOwner = true;
+            out = i == 0 ? bech32(rs[i]) : abi.encodePacked(out, ", ", bech32(rs[i]));
+        }
+        if (!hasOwner) revert BadReaders();
     }
 
     // ---- signatures ----------------------------------------------------------

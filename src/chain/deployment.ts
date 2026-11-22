@@ -3,5 +3,5 @@
 import type { Hex } from "viem";
 
 export const EVM_TESTNET = "https://evm-testnet.qore.host";
-export const COFFER_CONTRACT: Hex = "0xe94094e3e67d0c9c37b478616e3f5240127f40c9";
+export const COFFER_CONTRACT: Hex = "0x598d87f328739a6155486b41e4d191ff9e7f7d24";
 export const COFFER_SERVER = "https://coffer.jdollar.site";

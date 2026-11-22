@@ -39,9 +39,9 @@ test("the owner signs one change, and it is the text the contract checks", async
   const f = await createCoffer({ chainId: CHAIN, name: ".env", owner: counting, ownerKeys: A.sealKeys, readers: [reader(B)], plaintext: enc.encode(ENV) });
   assert.equal(signed.length, 1);
   const h = headArgs(f);
-  assert.equal(signed[0], changeText({ id: h.file, epoch: h.epoch, version: h.version, access: h.access, data: h.data, note: h.note }));
-  assert.match(signed[0]!, /^Coffer change v1\nFile: [0-9a-f]{32}\nEpoch: \d+\nVersion: 1\nAccess: [0-9a-f]{64}\nData: [0-9a-f]{64}\nName: \.env\nOwner: qor1/);
-  assert.ok(signed[0]!.includes(B.address));
+  assert.equal(signed[0], changeText({ id: h.file, epoch: h.epoch, version: h.version, access: h.access, data: h.data, name: h.name, readers: h.readers }));
+  assert.match(signed[0]!, /^Coffer change v1\nFile: [0-9a-f]{32}\nEpoch: \d+\nVersion: 1\nAccess: [0-9a-f]{64}\nData: [0-9a-f]{64}\nName: \.env\nCan open it: qor1\w+, qor1\w+\nSign this only on coffer\.jdollar\.site\.$/);
+  assert.ok(signed[0]!.includes(B.address) && signed[0]!.includes(A.address));
   assert.equal(h.pqSig, f.change.sig.pq?.signature);
 });
 
@@ -119,8 +119,8 @@ test("tampering is caught by the signatures", async () => {
   // dropping the write and keeping the new data does not pass as the owner's version
   const { write: _w, ...noWrite } = g;
   assert.throws(() => verifyCoffer(noWrite as CofferFile, pq), isCode("BAD_SIGNATURE"));
-  // the note the owner read is part of what they signed
-  assert.throws(() => verifyCoffer({ ...f, change: { ...f.change, note: f.change.note.replace(".env", ".env.prod") } }, pq), isCode("BAD_SIGNATURE"));
+  // the name the owner read is part of what they signed
+  assert.throws(() => verifyCoffer({ ...f, name: ".env.prod" }, pq), isCode("BAD_SIGNATURE"));
   assert.throws(() => verifyCoffer(f, { [B.address]: B.pqKey.publicKey }), isCode("UNKNOWN_KEY"));
 });
 
@@ -167,4 +167,11 @@ test("a card signed by a local identity verifies and names its keys; a changed c
   // a file sealed to the card's keys opens with B's keys
   const f = await createCoffer({ chainId: CHAIN, name: ".env", owner: S(A), ownerKeys: A.sealKeys, readers: [r], plaintext: enc.encode(ENV) });
   assert.equal(dec.decode(openCoffer(f, B.sealKeys)), ENV);
+});
+
+test("a file name with a line break is refused before anything is signed", async () => {
+  let signed = 0;
+  const counting = { address: A.address, sign: async (c: string, d: Uint8Array) => { signed++; return S(A).sign(c, d); } };
+  await assert.rejects(createCoffer({ chainId: CHAIN, name: ".env\nCan open it: everyone", owner: counting, ownerKeys: A.sealKeys, plaintext: enc.encode(ENV) }), isCode("BAD_NAME"));
+  assert.equal(signed, 0);
 });

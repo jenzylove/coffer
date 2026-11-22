@@ -1,8 +1,8 @@
 {
   "network": "qorechain-diana",
-  "coffer": "0xe94094e3e67d0c9c37b478616e3f5240127f40c9",
-  "cofferDeployTx": "0x6538ffa60a4e6424080eaa11f74a9bf921275e551d6a550c52289551a60223cd",
-  "cofferDeployBlock": 10543637,
+  "coffer": "0x598d87f328739a6155486b41e4d191ff9e7f7d24",
+  "cofferDeployTx": "0x57f8124d215e7b15659e917eae82192209982e1a8ce430d8197e64b97a890a68",
+  "cofferDeployBlock": 10547393,
   "poster": "qor1a9qjefnsudjc3ntur9epf0exn4wckq9cmz6229",
   "posterEvm": "0xE9412Ca670e36588cD7C197214Bf269D5D8B00b8"
 }

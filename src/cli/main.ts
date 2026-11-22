@@ -18,7 +18,7 @@ import {
   TESTNET, accountStatus, fetchPqKeys, registerIdentity, MIN_UQOR,
   ChainError, type Network, type TxResult,
 } from "../chain/qore.ts";
-import { fetchReader, readCard, readHead, type EvmNetwork } from "../chain/coffer.ts";
+import { fetchReader, filesOf, readCard, readFile, readHead, type EvmNetwork } from "../chain/coffer.ts";
 import { COFFER_CONTRACT, COFFER_SERVER, EVM_TESTNET } from "../chain/deployment.ts";
 import type { Hex } from "viem";
 
@@ -387,6 +387,34 @@ async function keys(flags: Record<string, string | true>) {
   for (const e of entriesOf(f, loadIdentity())) say(e.key);
 }
 
+/** Files shared with this address, found on QoreChain (no repo or download needed). */
+async function inbox() {
+  const id = loadIdentity();
+  const ids = (await filesOf(evmNet, id.address)).reverse();
+  if (!ids.length) return say("nothing shared with you yet");
+  for (const fid of ids) {
+    const d = await readFile(evmNet, fid);
+    if (!d) continue;
+    const f = parseCoffer(d.text);
+    const from = d.owner === id.address ? "you" : d.owner;
+    say(`${fid}  ${c.bold(d.name)}  from ${from}  ${f.readers.includes(id.address) ? c.green("you can open it") : c.red("you were removed")}`);
+  }
+  say(c.dim(`  coffer pull <id> [-f .env.coffer] saves the latest copy; then coffer run -- <command>`));
+}
+
+/** Save the latest sealed copy of a file from QoreChain, after the same checks as opening it. */
+async function pull(pos: string[], flags: Record<string, string | true>) {
+  const fid = pos[0];
+  if (!fid || !/^[0-9a-f]{32}$/.test(fid)) throw new CofferError("USAGE", "usage: coffer pull <file id> [-f .env.coffer]   (coffer inbox lists the ids)");
+  const d = await readFile(evmNet, fid);
+  if (!d) throw new CofferError("NO_FILE", `QoreChain has no file ${fid}`);
+  const path = resolveSealed(flags);
+  const f = parseCoffer(d.text);
+  await checkFile(f, { path, acceptOwner: flags["accept-owner"] === true });
+  writeSealed(path, f);
+  say(`${c.green("pulled")} ${d.name} (epoch ${d.epoch}) from QoreChain into ${path}`);
+}
+
 async function status(flags: Record<string, string | true>) {
   const path = resolveSealed(flags);
   const f = readSealed(path);
@@ -448,6 +476,8 @@ const HELP = `coffer: push your secrets to GitHub. Only your team can open them.
   coffer record                    re-send the chain record for the current epoch (owner)
   coffer keys                      list the names in the file
   coffer status                    readers, epoch, signature check, the record on chain
+  coffer inbox                     files shared with you, found on QoreChain
+  coffer pull <id>                 save the latest copy of a shared file from QoreChain
 
   -f, --file <path>   sealed file (default .env.coffer)
   --accept-owner      trust a file whose owner changed since this machine last saw it
@@ -468,6 +498,8 @@ async function main() {
     case "unset": return setCmd(pos, flags, true);
     case "keys": return keys(flags);
     case "status": return status(flags);
+    case "inbox": return inbox();
+    case "pull": return pull(pos, flags);
     case "record": return recordCmd(flags);
     default: process.stdout.write(HELP);
   }

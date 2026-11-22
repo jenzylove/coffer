@@ -7,6 +7,7 @@ import { createWalletClient, http, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { closeEvmWindowMsg } from "@qorechain/sdk";
 import { Poster, POSTER_NET, FEES, evmChain } from "../../server/poster.ts";
+import { SITE } from "../../src/core/vault.ts";
 
 const envPath = process.env.COFFER_ENV ?? `${process.env.HOME}/coffer-launch/relayer/.env`;
 const mnemonic = (process.env.POSTER_MNEMONIC ?? readFileSync(envPath, "utf8").match(/^POSTER_MNEMONIC=(.*)$/m)?.[1] ?? "").trim();
@@ -22,10 +23,14 @@ if (uqor < 1_000_000n) { console.log("fund the poster first (at least 1 QOR)"); 
 
 await poster.ensureRegistered();
 const art = JSON.parse(readFileSync("contracts/out/Coffer.sol/Coffer.json", "utf8"));
-// A deploy needs a window without targets (contract creation is refused in a scoped one): 2 txs, short.
+// A deploy needs a window without targets (contract creation is refused in a scoped one), so close
+// any scoped window first, then open a short one: 2 txs.
+const { evmWindowStatus } = await import("@qorechain/evm");
+const w = await evmWindowStatus({ rest: POSTER_NET.rest, address: poster.address });
+if (w.found && w.live) await poster.native("hybrid", [closeEvmWindowMsg(poster.address)], "close the open window");
 await poster.ensureWindow({ targets: [], minTxs: 0, blocks: 300n, maxTxs: 2n, maxValueUqor: 2n * 900_000n });
 const wallet = createWalletClient({ account: privateKeyToAccount(poster.acc.privateKey as Hex), chain: evmChain, transport: http() });
-const hash = await wallet.deployContract({ abi: art.abi, bytecode: art.bytecode.object as Hex, args: [POSTER_NET.chainId], gas: 4_000_000n, ...FEES });
+const hash = await wallet.deployContract({ abi: art.abi, bytecode: art.bytecode.object as Hex, args: [POSTER_NET.chainId, SITE], gas: 6_000_000n, ...FEES });
 const rc = await poster.pub.waitForTransactionReceipt({ hash, timeout: 120_000 });
 if (rc.status !== "success" || !rc.contractAddress) throw new Error(`deploy failed: ${hash}`);
 console.log(`Coffer deployed at ${rc.contractAddress} (tx ${hash}, block ${rc.blockNumber}, gas ${rc.gasUsed})`);

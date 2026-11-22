@@ -99,12 +99,12 @@ export class Poster {
   async ensureWindow(opts: { targets?: Hex[]; minTxs?: number; blocks?: bigint; maxTxs?: bigint; maxValueUqor?: bigint } = {}) {
     const w = await evmWindowStatus({ rest: POSTER_NET.rest, address: this.acc.cosmos });
     const targets = opts.targets ?? (this.contract ? [this.contract] : []);
-    if (w.found && w.live && w.remainingTxs > BigInt(opts.minTxs ?? 3) && w.remainingBlocks > 60n && w.maxValue - w.usedValue > 200_000n) return;
+    if (w.found && w.live && w.remainingTxs > BigInt(opts.minTxs ?? 3) && w.remainingBlocks > 60n && w.maxValue - w.usedValue > 500_000n) return;
     const msg = openEvmWindowMessage({
       sender: this.acc.cosmos,
       blocks: opts.blocks ?? 17_000n,
       maxTxs: opts.maxTxs ?? 400n,
-      maxValue: opts.maxValueUqor ?? 400n * 200_000n,
+      maxValue: opts.maxValueUqor ?? 400n * 400_000n,
       ...(targets.length ? { allowedTargets: targets } : {}),
     });
     await this.native("hybrid", [msg], `poster window (${targets.length ? "Coffer contract only" : "deploy"})`);

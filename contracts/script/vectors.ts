@@ -6,7 +6,7 @@ import { keccak_256 } from "@noble/hashes/sha3.js";
 import { recipientCardFields, recipientCardText } from "@qorechain/qoreseal";
 import { parseAddress } from "@qorechain/qoresign";
 import { identityFromMnemonic } from "../../src/core/identity.ts";
-import { changeText, ownerNote } from "../../src/core/vault.ts";
+import { changeText, sortByAddress, SITE } from "../../src/core/vault.ts";
 
 const MNEMONIC = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
 const CHAIN = "qorechain-diana";
@@ -16,8 +16,10 @@ const fields = recipientCardFields({ chainId: CHAIN, address: id.address, keys: 
 const card = recipientCardText(fields);
 const file = "00112233445566778899aabbccddeeff";
 const access = "a".repeat(64), data = "b".repeat(64);
-const note = ownerNote(".env", id.address, [id.address, "qor1wyvfhue6jja02pd2gqfm6rc6hl6jwv0afq5qja"]);
-const change = changeText({ id: file, epoch: 3n, version: 12n, access, data, note });
+const OTHER = "qor1wyvfhue6jja02pd2gqfm6rc6hl6jwv0afq5qja";
+const readers = sortByAddress([id.address, OTHER]);
+const change = changeText({ id: file, epoch: 3n, version: 12n, access, data, name: ".env", readers });
+const evmOf = (a: string) => toChecksum("0x" + Buffer.from(parseAddress(a).bytes).toString("hex"));
 
 const lit = (s: string) => `hex"${Buffer.from(s, "utf8").toString("hex")}"`;
 const out = `// SPDX-License-Identifier: Apache-2.0
@@ -35,7 +37,11 @@ library Vectors {
     bytes16 internal constant FILE = 0x${file};
     bytes32 internal constant ACCESS = 0x${access};
     bytes32 internal constant DATA = 0x${data};
-    string internal constant NOTE = ${JSON.stringify(note)};
+    string internal constant SITE = "${SITE}";
+    string internal constant NAME = ".env";
+    address internal constant OTHER = ${evmOf(OTHER)};
+    address internal constant READER_0 = ${evmOf(readers[0]!)}; // ascending address order
+    address internal constant READER_1 = ${evmOf(readers[1]!)};
     bytes internal constant CHANGE_TEXT = ${lit(change)};
 }
 `;
