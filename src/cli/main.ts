@@ -410,6 +410,8 @@ async function pull(pos: string[], flags: Record<string, string | true>) {
   if (!d) throw new CofferError("NO_FILE", `QoreChain has no file ${fid}`);
   const path = resolveSealed(flags);
   const f = parseCoffer(d.text);
+  const me = loadIdentity().address;
+  if (!f.readers.includes(me)) throw new CofferError("NOT_A_READER", `you were removed from ${d.name}: its latest version is not sealed to you, so there is nothing for you to open`);
   await checkFile(f, { path, acceptOwner: flags["accept-owner"] === true });
   writeSealed(path, f);
   say(`${c.green("pulled")} ${d.name} (epoch ${d.epoch}) from QoreChain into ${path}`);
