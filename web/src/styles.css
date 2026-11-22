@@ -429,3 +429,13 @@ details.ada > *:not(summary) { margin-top: 16px; }
 .btn-outline.btn-block { min-height: 52px; }
 .struck .typed { text-decoration: line-through; text-decoration-thickness: 1.5px; }
 @media (max-width: 480px) { .hero-doc .sheet { padding: 20px 18px 22px; font-size: 12.5px; } .hero-to { font-size: 12.5px; gap: 4px 16px; } }
+
+/* a short confirmation after seal, share, remove, or a new file arriving */
+.toast-wrap { position: fixed; left: 0; right: 0; bottom: 24px; display: flex; justify-content: center; pointer-events: none; z-index: 60; padding: 0 16px; }
+.toast { pointer-events: auto; display: flex; align-items: center; gap: 12px; max-width: 560px; background: var(--ink); color: #f6f6f3; padding: 14px 16px 14px 18px; font-size: 15px; line-height: 1.4; box-shadow: 0 10px 30px rgba(0,0,0,.18); animation: toastin .22s ease-out; }
+.toast-mark { color: #7fd6a8; font-weight: 700; }
+.toast-x { background: none; border: 0; color: #f6f6f3; opacity: .6; font-size: 20px; line-height: 1; cursor: pointer; padding: 0 0 0 6px; }
+.toast-x:hover { opacity: 1; }
+@keyframes toastin { from { transform: translateY(10px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
+.new-tag { margin-left: 8px; font-family: var(--sans); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--green); border: 1px solid var(--green); padding: 1px 5px; vertical-align: 2px; }

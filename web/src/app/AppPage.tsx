@@ -15,6 +15,16 @@ import { parseDotenv, serializeDotenv, type DotenvEntry } from "../../../src/cor
 import { IMPORT_KEY, type ImportHint } from "../landing/ScanDoor.tsx";
 import { Addr, Chips, CopyAction, DropText, KeyFilePicker, Log, Problem, Progress, RecordFacts, Result, TxLink, type LogLine } from "./bits.tsx";
 import { OpenFile } from "./OpenFile.tsx";
+import { Toaster, toast } from "../components/Toast.tsx";
+
+// Files shared with an address that it has already looked at, so new arrivals can say "New".
+const seenKey = (a: string) => `coffer.seen.${a}`;
+function seenIds(a: string): Set<string> {
+  try { return new Set(JSON.parse(localStorage.getItem(seenKey(a)) ?? "[]")); } catch { return new Set(); }
+}
+function markSeen(a: string, id: string) {
+  try { const s = seenIds(a); if (!s.has(id)) { s.add(id); localStorage.setItem(seenKey(a), JSON.stringify([...s])); } } catch { /* storage blocked */ }
+}
 
 const idOf = (s: Stored) => { try { return parseCoffer(s.text).id; } catch { return ""; } };
 const ownerOf = (s: Stored) => { try { return parseCoffer(s.text).owner; } catch { return ""; } };
@@ -68,6 +78,7 @@ export default function AppRoute() {
     <IdentityProvider>
       <Page>
         <App />
+        <Toaster />
       </Page>
     </IdentityProvider>
   );
@@ -374,6 +385,17 @@ function Dashboard({ invite, onInviteDone }: { invite: Invite | null; onInviteDo
   // what QoreChain says: every file this address is or was a reader of
   const [chain, setChain] = useState<Delivered[] | null>(null);
   const shared = useMemo(() => (chain ?? []).filter((d) => d.owner !== address), [chain, address]);
+  const announced = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    if (!address || chain === null) return;
+    const can = shared.filter((d) => d.readers.includes(address));
+    if (announced.current === null) { announced.current = new Set(can.map((d) => d.id)); return; } // first read: the list shows them
+    for (const d of can) {
+      if (announced.current.has(d.id)) continue;
+      announced.current.add(d.id);
+      toast(`${short(d.owner, 6, 4)} shared ${d.name} with you. It's under Shared with you.`);
+    }
+  }, [shared, address, chain]);
   const picked = useRef(false);
   const [view, setView] = useState<View>(() => {
     if (location.hash === "#open") return { kind: "open" };
@@ -480,6 +502,7 @@ function Dashboard({ invite, onInviteDone }: { invite: Invite | null; onInviteDo
               const f = parseCoffer(text);
               const at = new Date().toISOString();
               setFiles((list) => [{ text, tx: rec.hash, block: rec.block, changed: at, note: "Sealed. Safe to commit.", log: [{ what: "Sealed", hash: rec.hash, block: rec.block, at }] }, ...list]);
+              toast(`Sealed ${f.name} and recorded it on QoreChain. Now add who can open it.`);
               pick({ kind: "file", id: f.id }, false);
             }} />
           )}
@@ -501,6 +524,7 @@ function Sidebar({ mine, shared, chainRead, view, pick, readyAll }: {
   const ident = useIdentity();
   const { address, kind, status } = ident;
   const [err, setErr] = useState<unknown>(null);
+  const seen = useMemo(() => (address ? seenIds(address) : new Set<string>()), [address, view, shared]);
   if (!address) return null;
   const save = () => { const k = ident.keyFile(); if (k) download(k.name, k.text, "application/json"); };
   const on = (v: View) => !!view && view.kind === v.kind && (!("id" in v) || ("id" in view && view.id === v.id));
@@ -540,9 +564,10 @@ function Sidebar({ mine, shared, chainRead, view, pick, readyAll }: {
             {shared.map((d) => {
               const can = d.readers.includes(address);
               const twin = shared.some((o) => o !== d && o.name === d.name);
+              const fresh = can && !seen.has(d.id);
               return (
                 <button key={d.id} role="tab" aria-selected={on({ kind: "shared", id: d.id })} className="file-row" onClick={() => pick({ kind: "shared", id: d.id })}>
-                  <span className="mono file-name">{d.name}.coffer{twin ? <span className="dim"> #{d.id.slice(0, 4)}</span> : null}</span>
+                  <span className="mono file-name">{d.name}.coffer{twin ? <span className="dim"> #{d.id.slice(0, 4)}</span> : null}{fresh ? <span className="new-tag">New</span> : null}</span>
                   <span className="file-meta">from {short(d.owner, 6, 4)} · {can ? "You can open it" : "You were removed"}</span>
                 </button>
               );
@@ -669,7 +694,7 @@ function SealPanel({ first, onSealed }: { first: boolean; onSealed: (text: strin
     if (needsDx && !dx) return { entries: null, note: "Reading the file…" };
     const scan = dx ? dx.scanDotenvx(env) : { isDotenvx: false, encryptedKeys: [] as string[] };
     if (tab === "plain") {
-      if (scan.isDotenvx) return { entries: null, note: "This file is locked by dotenvx. Switch to \"Move from dotenvx\" to bring its values over." };
+      if (scan.isDotenvx) return { entries: null, note: "This file is locked by dotenvx. Press \"Bring that file over\" below the box to unlock and move its values." };
       const e = parseDotenv(env);
       return { entries: e, note: e.length ? null : "No NAME=value lines found." };
     }
@@ -709,11 +734,11 @@ function SealPanel({ first, onSealed }: { first: boolean; onSealed: (text: strin
         </div>
       )}
       {hintErr && <Problem text={`Couldn't fetch ${hint?.path ?? "the file"} from GitHub. Paste it below instead.`} />}
-      <div className="seg" role="tablist" aria-label="Source">
-        <button role="tab" aria-selected={tab === "plain"} onClick={() => setTab("plain")}>Paste a .env</button>
-        <button role="tab" aria-selected={tab === "dotenvx"} onClick={() => setTab("dotenvx")}>Move from dotenvx</button>
-      </div>
+      {tab === "dotenvx" && (
+        <p className="muted">dotenvx locks a .env with a key that a quantum computer could break. Paste the locked file and its .env.keys: Coffer unlocks it here in your browser and seals it again. <button className="link-sm" onClick={() => setTab("plain")}>Back to a plain .env</button></p>
+      )}
       <DropText id="envtext" label={tab === "plain" ? "Your .env" : "Your dotenvx .env"} value={env} onChange={setEnv} placeholder={"NAME=value\nOTHER_NAME=value"} />
+      {tab === "plain" && <p className="muted small">Already use dotenvx? <button className="link-sm" onClick={() => setTab("dotenvx")}>Bring that file over</button></p>}
       {tab === "dotenvx" && (
         <>
           <DropText id="keystext" label="Its .env.keys" value={envKeys} onChange={setEnvKeys} rows={3} placeholder="DOTENV_PRIVATE_KEY=…" />
@@ -791,6 +816,7 @@ type SharedState = { s: "checking" } | { s: "ok"; entries: DotenvEntry[] } | { s
 function SharedView({ d }: { d: Delivered }) {
   const { address, keys } = useIdentity();
   const can = !!address && d.readers.includes(address);
+  useEffect(() => { if (address) markSeen(address, d.id); }, [address, d.id]);
   const [st, setSt] = useState<SharedState>({ s: "checking" });
   useEffect(() => {
     let live = true;
@@ -926,6 +952,7 @@ function FileDetail({ stored, ready, onChange }: { stored: Stored; ready: Record
       });
       setChanged((c) => c.filter((x) => x !== a));
       setAddr("");
+      toast(again ? `${who(a)} can open it again.` : `Shared with ${who(a)}. It's in their Coffer now.`);
     } catch (e) {
       log.fail();
       setErr(e);
@@ -945,6 +972,7 @@ function FileDetail({ stored, ready, onChange }: { stored: Stored; ready: Record
         removed: [...new Set([...(stored.removed ?? []), a])], rotate: isAda(a) ? undefined : { who: who(a), names: r.rotate },
       });
       if (isAda(a)) setOutcomes((o) => [...o, { kind: "revoke", rotate: r.rotate, tx: rec.hash, block: rec.block }]);
+      toast(`Removed ${who(a)}. They can't open the new version.`);
     } catch (e) {
       log.fail();
       setErr(e);
