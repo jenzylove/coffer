@@ -68,6 +68,10 @@ interface Ctx {
   /** A short sentence while connecting or making keys. */
   busy: string | null;
   walletMissing: boolean;
+  /** QoreX is installed in this browser (null while looking). */
+  qorexAvailable: boolean | null;
+  /** A key made in this browser is stored here (it can be switched back to). */
+  hasBrowserKey: boolean;
   error: unknown;
   status: Status | null;
   statusError: unknown;
@@ -99,6 +103,8 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<Status | null>(null);
   const [statusError, setStatusError] = useState<unknown>(null);
   const [justConnected, setJustConnected] = useState(false);
+  const [qorexAvailable, setQorexAvailable] = useState<boolean | null>(null);
+  const [hasBrowserKey, setHasBrowserKey] = useState(() => !!store.get(PHRASE));
   const addrRef = useRef<string | null>(null);
   const keysRef = useRef<SealKeyPair | null>(null);
 
@@ -164,6 +170,12 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => { if (address) void refresh(); }, [address, refresh]);
 
+  useEffect(() => {
+    let live = true;
+    findQorex(1500).then((q) => { if (live) setQorexAvailable(!!q); });
+    return () => { live = false; };
+  }, []);
+
   // QoreX does not announce account changes: read the key again when the page comes back
   useEffect(() => {
     if (kind !== "qorex" || !address) return;
@@ -181,15 +193,16 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
   const connectQorex = useCallback(async () => {
     setError(null);
     const q = await findQorex(400);
-    if (!q) { setWalletMissing(true); return null; }
+    if (!q) { setWalletMissing(true); setQorexAvailable(false); return null; }
     setWalletMissing(false);
+    setQorexAvailable(true);
     setBusy("Waiting for QoreX.");
     try {
       await q.enable(CHAIN);
       const k = await q.getKey(CHAIN);
+      await takeWallet(q, k.bech32Address);
       store.set(KIND, "qorex");
       setKind("qorex");
-      await takeWallet(q, k.bech32Address);
       setJustConnected(true);
       return k.bech32Address;
     } catch (e) {
@@ -206,9 +219,10 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     try {
       const phrase = store.get(PHRASE) ?? await work<string>("newPhrase");
       store.set(PHRASE, phrase);
+      setHasBrowserKey(true);
+      await takeLocal(phrase);
       store.set(KIND, "local");
       setKind("local");
-      await takeLocal(phrase);
       setJustConnected(true);
     } catch (e) {
       setError(e);
@@ -255,9 +269,10 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     if (!phrase) throw coded("KEYFILE_BAD", "That isn't a Coffer key file.");
     try { await work("identity", { phrase }); } catch { throw coded("KEYFILE_BAD", "That key file is damaged."); }
     store.set(PHRASE, phrase);
+    setHasBrowserKey(true);
+    await takeLocal(phrase);
     store.set(KIND, "local");
     setKind("local");
-    await takeLocal(phrase);
   }, [kind, connectQorex, refresh, takeLocal]);
 
   const keyFile = useCallback(() => {
@@ -286,16 +301,16 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
 
   const forgetKey = useCallback(() => {
     const a = addrRef.current;
-    if (kind === "local") { store.set(PHRASE, null); disconnect(); return; }
+    if (kind === "local") { store.set(PHRASE, null); setHasBrowserKey(false); disconnect(); return; }
     if (a) { store.set(seedKey(a), null); putKeys(null); setStatus(null); void refresh(); }
   }, [kind, disconnect, refresh]);
 
   const owner = useMemo<OwnerRef | null>(() => (kind === "local" && id ? { kind: "local", id } : kind === "qorex" && address ? { kind: "wallet", address } : null), [kind, id, address]);
 
   const value = useMemo<Ctx>(() => ({
-    kind, address, keys, id, owner, busy, walletMissing, error, status, statusError, justConnected,
+    kind, address, keys, id, owner, busy, walletMissing, qorexAvailable, hasBrowserKey, error, status, statusError, justConnected,
     connectQorex, chooseBrowser, ensureKeys, newKey, loadKeyFile, keyFile, refresh, disconnect, forgetKey,
-  }), [kind, address, keys, id, owner, busy, walletMissing, error, status, statusError, justConnected,
+  }), [kind, address, keys, id, owner, busy, walletMissing, qorexAvailable, hasBrowserKey, error, status, statusError, justConnected,
     connectQorex, chooseBrowser, ensureKeys, newKey, loadKeyFile, keyFile, refresh, disconnect, forgetKey]);
   return <IdentityContext.Provider value={value}>{children}</IdentityContext.Provider>;
 }

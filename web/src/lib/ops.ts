@@ -67,6 +67,8 @@ export interface Stored {
   waiting?: string[];
   /** Changes recorded from this browser. */
   log?: LogEntry[];
+  /** After the last removal: who, and the names to change at the provider. */
+  rotate?: { who: string; names: string[] };
 }
 const FILES = "coffer.files.v2";
 export function loadFiles(): Stored[] {
@@ -100,6 +102,7 @@ export function explain(code: string | undefined, message: string): string {
     case "WRITER_NOT_READER": return "The last person to change this file isn't on its list.";
     case "WRONG_CHAIN": return "This file is for another QoreChain network.";
     case "BAD_FORMAT": return "This isn't a Coffer file.";
+    case "BAD_NAME": return "A file name must be 1 to 64 characters on one line.";
     case "BAD_ADDRESS": return "That doesn't look like a QoreChain address. It starts with qor1.";
     case "NOT_OWNER": return "Only the person who sealed this file can change who opens it.";
     case "EVM_ERROR": case "REST_ERROR": return "QoreChain can't be reached right now. Try again in a moment.";

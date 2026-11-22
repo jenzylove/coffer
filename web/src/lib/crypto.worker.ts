@@ -17,7 +17,7 @@ import { signCard } from "../../../src/core/card.ts";
 import { identityFromMnemonic, newMnemonic, type Identity } from "../../../src/core/identity.ts";
 import { parseDotenv, serializeDotenv } from "../../../src/core/dotenv.ts";
 import { accountStatus, fetchPqKeys, registerIdentity, type Network } from "../../../src/chain/qore.ts";
-import { COFFER_ABI, evmAddress, fetchReader, qorAddress, readCard, readHead, rpc, type EvmNetwork } from "../../../src/chain/coffer.ts";
+import { COFFER_ABI, evmAddress, fetchReader, filesOf, qorAddress, readCard, readFile, readHead, rpc, type DeliveredFile, type EvmNetwork } from "../../../src/chain/coffer.ts";
 
 const CHAIN = "qorechain-diana";
 // QoreChain goes through our own server (/rest, /evm); relative URLs resolve to this origin in the worker too
@@ -63,6 +63,8 @@ function signerFor(o: OwnerRef, opId: number): Signer {
 }
 
 // ---- cards ------------------------------------------------------------------------
+
+const delivered = new Map<string, DeliveredFile & { hash: string | null }>();
 
 type CardState = { state: "none" } | { state: "ours" | "other"; height: number };
 
@@ -119,6 +121,32 @@ const ops: Record<string, (a: any, ctx: Ctx) => unknown> = {
   },
   async readHead({ fileId }: { fileId: string }) {
     return readHead(await evm(), fileId);
+  },
+  /**
+   * Every file this address is or was a reader of, newest first, each with its
+   * latest sealed copy from QoreChain. A copy is read again only when its head moved.
+   */
+  async inbox({ address }: { address: string }) {
+    const net = await evm();
+    const ids = await filesOf(net, address);
+    const items = await Promise.all(ids.map(async (id) => {
+      const head = await readHead(net, id);
+      if (!head) return null;
+      let d = delivered.get(id);
+      if (!d || d.height !== head.height || d.epoch !== head.epoch) {
+        const got = await readFile(net, id);
+        if (!got) return null;
+        // the transaction that delivered this copy, for the explorer link
+        const topics = encodeEventTopics({ abi: COFFER_ABI, eventName: "HeadSet", args: { file: `0x${id}` as Hex } });
+        const logs = await rpc<{ transactionHash: Hex }[]>(net.evm, "eth_getLogs", [{ address: net.coffer, fromBlock: toHex(got.height), toBlock: toHex(got.height), topics }]).catch(() => []);
+        d = { ...got, hash: logs[logs.length - 1]?.transactionHash ?? null };
+        delivered.set(id, d);
+      }
+      let readers: string[] = [];
+      try { readers = parseCoffer(d.text).readers; } catch { return null; }
+      return { id, name: d.name, owner: d.owner, epoch: d.epoch, version: d.version, height: d.height, text: d.text, readers, hash: d.hash };
+    }));
+    return items.filter((x) => x !== null).reverse();
   },
   /** The checks a reader runs: signatures against keys on chain, then the file's head on chain. */
   async check({ text }: { text: string }) {

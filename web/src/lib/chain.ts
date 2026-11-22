@@ -13,6 +13,10 @@ export const status = (address: string, keys: SealKeyPair | null) => work<Status
 export const hasCard = (address: string) => work<boolean>("hasCard", { address });
 export const readHead = (fileId: string) => work<ChainHead | null>("readHead", { fileId });
 export const changedReaders = (text: string) => work<string[]>("changedReaders", { text });
+
+/** A file found on QoreChain for this address: its latest sealed copy and who can open it. */
+export interface Delivered { id: string; name: string; owner: string; epoch: bigint; version: bigint; height: number; text: string; readers: string[]; hash: string | null }
+export const inbox = (address: string) => work<Delivered[]>("inbox", { address });
 /** Register the signing key, then the sealing key; onStep gets each step and its transaction. */
 export const registerIdentity = (id: Identity, onStep?: (step: string, hash?: string) => void) =>
   work<{ mldsa?: TxResult; kem?: TxResult }>("registerIdentity", { id }, "main", onStep);

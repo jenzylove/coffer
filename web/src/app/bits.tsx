@@ -51,14 +51,15 @@ export function Progress({ lines }: { lines: LogLine[] }) {
 }
 
 /** A problem in plain words, with the raw code and message one tap away. */
-export function Problem({ error, text }: { error?: unknown; text?: string }) {
+export function Problem({ error, text, plain: inline = false }: { error?: unknown; text?: string; plain?: boolean }) {
   const code = error ? errCode(error) : undefined;
   const raw = error ? errText(error) : undefined;
   const plain = text ?? explain(code, raw ?? "");
   // a closed wallet popup is not a problem: say it calmly, without a red line
   const calm = code === "SIGN_REJECTED" || code === "CONNECT_REJECTED";
+  // inline: one quiet line under a list row, no block
   return (
-    <div className={calm ? "calm" : "problem"} role={calm ? "status" : "alert"}>
+    <div className={inline ? "row-problem" : calm ? "calm" : "problem"} role={calm ? "status" : "alert"}>
       <p>{plain}</p>
       {raw && raw !== plain && !calm && (
         <details className="steps">
