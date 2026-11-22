@@ -17,7 +17,6 @@ export function Log({ lines }: { lines: LogLine[] }) {
     <ol className="log">
       {lines.map((l, i) => (
         <li key={i} className={`log-${l.state}`}>
-          <span className="log-dot" aria-hidden />
           <span>{l.text}</span>
           {l.hash ? <TxLink hash={l.hash} /> : <span />}
         </li>
@@ -26,26 +25,15 @@ export function Log({ lines }: { lines: LogLine[] }) {
   );
 }
 
-/** One line that changes while work is going on; the steps live behind Details. */
-export function Progress({ lines, bare = false }: { lines: LogLine[]; bare?: boolean }) {
-  if (!lines.length) return null;
+/** One line that changes while work is going on, with a thin orange bar. */
+export function Progress({ lines }: { lines: LogLine[] }) {
   const doing = lines.find((l) => l.state === "doing");
+  if (!doing) return null;
   const n = lines.filter((l) => l.state === "done").length;
   return (
     <div className="progress" aria-live="polite">
-      {doing && (
-        <p className="prog-line">
-          <span className="spin" aria-hidden />
-          <span>{doing.text}</span>
-        </p>
-      )}
-      {doing && <span className="prog-bar" aria-hidden><span style={{ width: `${Math.min(92, 18 + n * 22)}%` }} /></span>}
-      {!bare && (
-        <details className="steps">
-          <summary>Details</summary>
-          <Log lines={lines} />
-        </details>
-      )}
+      <span className="prog-bar" aria-hidden><span style={{ width: `${Math.min(92, 14 + n * 20)}%` }} /></span>
+      <p className="prog-line mono">{doing.text}…</p>
     </div>
   );
 }
@@ -61,7 +49,7 @@ export function Problem({ error, text }: { error?: unknown; text?: string }) {
       {raw && raw !== plain && (
         <details className="steps">
           <summary>Details</summary>
-          <p className="mono small">{code ? `${code}: ` : ""}{raw}</p>
+          <p className="mono">{code ? `${code}: ` : ""}{raw}</p>
         </details>
       )}
     </div>
@@ -69,12 +57,12 @@ export function Problem({ error, text }: { error?: unknown; text?: string }) {
 }
 
 /** A short address with a copy button; the full one is in the title and the clipboard. */
-export function Addr({ a, className = "" }: { a: string; className?: string }) {
+export function Addr({ a }: { a: string }) {
   const [done, setDone] = useState(false);
   return (
-    <span className={`addr-short ${className}`}>
-      <span className="mono addr-v" title={a}>{short(a, 8, 5)}</span>
-      <button className="copybtn" onClick={async () => { try { await navigator.clipboard.writeText(a); setDone(true); setTimeout(() => setDone(false), 1400); } catch { /* blocked */ } }} aria-label="Copy the full address">
+    <span className="addr-short">
+      <span className="mono addr-v" title={a}>{short(a, 8, 4)}</span>
+      <button className="copy" onClick={async () => { try { await navigator.clipboard.writeText(a); setDone(true); setTimeout(() => setDone(false), 1400); } catch { /* blocked */ } }} aria-label="Copy the full address">
         {done ? "Copied" : "Copy"}
       </button>
     </span>
@@ -82,12 +70,12 @@ export function Addr({ a, className = "" }: { a: string; className?: string }) {
 }
 
 export function Chips({ names }: { names: string[] }) {
-  return <p className="chips">{names.map((n) => <span key={n} className="chip">{n}</span>)}</p>;
+  return <p className="chips">{names.map((n) => <span key={n} className="chip mono">{n}</span>)}</p>;
 }
 
-/** The result of a step: one sentence in its state colour. */
-export function Result({ tone, children }: { tone: "open" | "blue" | "seal"; children: ReactNode }) {
-  return <p className={`result tone-${tone}`}><span className="result-dot" aria-hidden />{children}</p>;
+/** The result of a step: one sentence; the key word may be orange. */
+export function Result({ children }: { children: ReactNode }) {
+  return <p className="result">{children}</p>;
 }
 
 /** A text area that also takes a dropped file. */
@@ -104,29 +92,12 @@ export function DropText({ value, onChange, label, placeholder, rows = 7, id }: 
       <label htmlFor={id} className="label">{label}</label>
       <textarea id={id} className="mono" rows={rows} value={value} placeholder={placeholder} spellCheck={false} autoComplete="off" onChange={(e) => onChange(e.target.value)} />
       <div className="drop-foot">
-        <span className="muted small">Paste, or drop the file here.</span>
-        <label className="btn btn-quiet btn-sm">
+        <span>Paste, or drop the file here.</span>
+        <label className="text-act">
           Choose a file
           <input type="file" className="sr" onChange={async (e) => { const f = e.target.files?.[0]; if (f) onChange(await f.text()); e.target.value = ""; }} />
         </label>
       </div>
     </div>
   );
-}
-
-export function Step({ n, title, state, summary, children, id }: { n: number; title: string; state: "locked" | "now" | "done"; summary?: ReactNode; children?: ReactNode; id?: string }) {
-  return (
-    <section className={`step step-${state}`} id={id} aria-labelledby={`step-${n}`}>
-      <header className="step-head">
-        <span className="step-n mono" aria-hidden>{state === "done" ? "✓" : n}</span>
-        <h2 id={`step-${n}`}>{title}</h2>
-        {summary && <span className="step-sum">{summary}</span>}
-      </header>
-      <div className="step-body">{children}</div>
-    </section>
-  );
-}
-
-export function Msg({ kind, children }: { kind: "err" | "ok" | "note"; children: ReactNode }) {
-  return <p className={`msg msg-${kind}`} role={kind === "err" ? "alert" : undefined}>{children}</p>;
 }

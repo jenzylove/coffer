@@ -4,7 +4,7 @@
 type Lane = "main" | "hero";
 const workers = new Map<Lane, Worker>();
 let seq = 0;
-const waiting = new Map<number, { lane: Lane; ok: (v: any) => void; fail: (e: Error) => void }>();
+const waiting = new Map<number, { lane: Lane; ok: (v: any) => void; fail: (e: Error) => void; progress?: (text: string, hash?: string) => void }>();
 
 function failLane(lane: Lane, message: string) {
   for (const [id, w] of waiting) if (w.lane === lane) { w.fail(new Error(message)); waiting.delete(id); }
@@ -13,10 +13,14 @@ function failLane(lane: Lane, message: string) {
 function get(lane: Lane): Worker {
   const have = workers.get(lane);
   if (have) return have;
-  const worker = new Worker(new URL("./crypto.worker.ts", import.meta.url), { type: "module" });
-  worker.onmessage = (e: MessageEvent<{ id: number; ok: boolean; value?: unknown; message?: string; code?: string }>) => {
+  // the hero has its own small worker (sealing only); the app's worker also carries the chain code
+  const worker = lane === "hero"
+    ? new Worker(new URL("./hero.worker.ts", import.meta.url), { type: "module" })
+    : new Worker(new URL("./crypto.worker.ts", import.meta.url), { type: "module" });
+  worker.onmessage = (e: MessageEvent<{ id: number; ok?: boolean; value?: unknown; message?: string; code?: string; progress?: { text: string; hash?: string } }>) => {
     const w = waiting.get(e.data.id);
     if (!w) return;
+    if (e.data.progress) { w.progress?.(e.data.progress.text, e.data.progress.hash); return; }
     waiting.delete(e.data.id);
     if (e.data.ok) w.ok(e.data.value);
     else w.fail(Object.assign(new Error(e.data.message ?? "failed"), { code: e.data.code }));
@@ -29,10 +33,10 @@ function get(lane: Lane): Worker {
   return worker;
 }
 
-export function work<T>(op: string, args: unknown = {}, lane: Lane = op.startsWith("hero") ? "hero" : "main"): Promise<T> {
+export function work<T>(op: string, args: unknown = {}, lane: Lane = op.startsWith("hero") ? "hero" : "main", progress?: (text: string, hash?: string) => void): Promise<T> {
   return new Promise<T>((ok, fail) => {
     const id = ++seq;
-    waiting.set(id, { lane, ok, fail });
+    waiting.set(id, { lane, ok, fail, progress });
     get(lane).postMessage({ id, op, args });
   });
 }

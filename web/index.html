@@ -3,18 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Coffer · Push your secrets to GitHub. Only your team can open them.</title>
-    <meta name="description" content="Coffer seals your .env so it is safe to commit to any repo. Share it by typing a teammate's QoreChain address, take access back the same way. Sealed with ML-KEM-1024, so a quantum computer later can't open it either." />
-    <meta name="theme-color" content="#edf1f7" />
+    <title>Coffer · Lock your .env to your team</title>
+    <meta name="description" content="Coffer locks your .env to the people you name, so the file is safe to commit to any repo. Share it by typing a teammate's QoreChain address and take access back the same way. The lock is ML-KEM-1024, built to hold against quantum computers." />
+    <meta name="theme-color" content="#f6f6f3" />
+    <meta name="color-scheme" content="light" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <script>
-      try {
-        var t = localStorage.getItem("coffer.theme");
-        document.documentElement.dataset.theme = t === "light" || t === "dark" ? t : matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-      } catch (e) { document.documentElement.dataset.theme = "dark"; }
-    </script>
   </head>
   <body>
+    <script>
+      // start both web fonts before the first layout, so the page lays out once instead of twice
+      try { document.fonts.load('400 16px "Fragment Mono"'); document.fonts.load('800 16px "Mona Sans Variable"'); } catch (e) {}
+    </script>
     <a class="skip" href="#main">Skip to content</a>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>

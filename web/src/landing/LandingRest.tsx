@@ -1,34 +1,18 @@
-import { CopyButton, Reveal } from "../components/Chrome.tsx";
-import { Link } from "../lib/router.tsx";
+// Everything below the hero: loaded after the first paint, then rendered one
+// section per idle slot so no single task blocks the page.
 import { startTransition, useEffect, useState, type ReactNode } from "react";
-import { LocalDemo } from "./LocalDemo.tsx";
+import { Reveal } from "../components/Chrome.tsx";
+import { Sheet, Tag } from "../components/Doc.tsx";
+import { Link } from "../lib/router.tsx";
+import { Story } from "./Story.tsx";
+import { ScanDoor } from "./ScanDoor.tsx";
 
 const FOUND = 2284, ENCRYPTED = 1716;
 
-function Head({ n, title, sub }: { n: string; title: string; sub?: string }) {
-  return (
-    <Reveal className="shead">
-      <span className="shead-n">{n}</span>
-      <h2>{title}</h2>
-      {sub && <p className="shead-sub">{sub}</p>}
-    </Reveal>
-  );
-}
-
-const CLI: { show: string; copy: string; note: string }[] = [
-  { show: "coffer init", copy: "npx github:jenzylove/coffer init", note: "make your address" },
-  { show: "coffer lock", copy: "npx github:jenzylove/coffer lock", note: "seal .env into .env.coffer" },
-  { show: "coffer share qor1…", copy: "npx github:jenzylove/coffer share ", note: "add a reader" },
-  { show: "coffer revoke qor1…", copy: "npx github:jenzylove/coffer revoke ", note: "remove one, list what to rotate" },
-  { show: "coffer run -- npm start", copy: "npx github:jenzylove/coffer run -- npm start", note: "secrets in memory only" },
-  { show: "coffer import", copy: "npx github:jenzylove/coffer import", note: "move a dotenvx file over" },
-];
-
-const CHAIN: { q: string; a: string }[] = [
-  { q: "A public registry of sealing keys", a: "Every QoreChain account can publish an ML-KEM-1024 key, signed by its own ML-DSA key. That is what lets you seal to someone knowing only their address." },
-  { q: "Two signatures on every file", a: "The owner signs who can read; the last writer signs what was written. Readers check both against keys on chain, so a hand edited reader list is refused." },
-  { q: "A record of every share and revoke", a: "Each change is a small signed transaction. Before opening, Coffer reads it, so an old copy restored after a revoke is refused." },
-  { q: "What it costs", a: "Setup is 0.054 test QOR once per person, paid by the Coffer relayer. Each share or revoke record is about 0.017." },
+const WHY: { q: string; a: string }[] = [
+  { q: "Every address has a public sealing key on chain.", a: "So you can lock a file to a teammate knowing only their address. No key swapping, no invite links." },
+  { q: "Every change is signed with a quantum safe key.", a: "The owner signs who can read and the last writer signs what was written, with ML-DSA-87 keys registered on QoreChain." },
+  { q: "Every share and revoke is recorded, so old copies are refused.", a: "Before opening, Coffer reads the record. A copy restored from before a revoke is refused." },
 ];
 
 const SAFETY: { q: string; a: string }[] = [
@@ -50,111 +34,109 @@ const FAQ: { q: string; a: string }[] = [
 
 function Rows({ items, first = false }: { items: { q: string; a: string }[]; first?: boolean }) {
   return (
-    <Reveal className="rows">
+    <div className="rows">
       {items.map((f, i) => (
         <details key={f.q} open={first && i === 0}>
           <summary>{f.q}</summary>
           <p>{f.a}</p>
         </details>
       ))}
-    </Reveal>
+    </div>
   );
 }
 
-// Everything below the hero: loaded after the first paint, then rendered one
-// section per idle slot so no single task blocks the page.
 const SECTIONS: (() => ReactNode)[] = [
-    () => (
-      <section className="sect" id="problem">
-        <div className="wrap">
-          <Head n="01" title="Encrypted today. Readable later." />
-          <Reveal className="count">
+  () => (
+    <section className="block" id="problem" aria-labelledby="h-problem">
+      <div className="wrap split">
+        <Reveal>
+          <h2 id="h-problem" className="h-section">Encrypted today. Readable later.</h2>
+          <p className="lead">dotenvx lets teams commit encrypted .env files, locked with a curve a quantum computer breaks. Public repos are copied and kept forever.</p>
+        </Reveal>
+        <Reveal className="problem-doc">
+          <Sheet left=".env, committed with dotenvx" right="format example">
+            <div className="env-line"><span className="env-k">DOTENV_PUBLIC_KEY=</span><span className="dim">"02b4e1…c9a7"</span></div>
+            <div className="env-line"><span className="env-k">DATABASE_URL=</span><span className="dim">"encrypted:BNx4…"</span></div>
+            <div className="env-line"><span className="env-k">OPENAI_API_KEY=</span><span className="dim">"encrypted:BKq9…"</span></div>
+            <div className="sheet-foot"><Tag>secp256k1: a quantum computer opens this</Tag></div>
+          </Sheet>
+          <div className="count">
             <p className="count-n">{ENCRYPTED.toLocaleString("en")}</p>
-            <p className="count-l">public files on GitHub hold dotenvx values locked with secp256k1, a curve a quantum computer breaks. Repos are copied forever.</p>
-            <div className="bar" role="img" aria-label={`${ENCRYPTED} of ${FOUND} dotenvx files hold encrypted values`}><span style={{ width: `${(ENCRYPTED / FOUND) * 100}%` }} /></div>
-            <p className="count-of">{ENCRYPTED.toLocaleString("en")} of {FOUND.toLocaleString("en")} files that carry a dotenvx key</p>
-            <details className="method">
+            <p className="count-l">public GitHub files like this one, 17 Nov 2026</p>
+            <p className="mono small dim">GitHub code search: DOTENV_PUBLIC_KEY encrypted:</p>
+            <details className="mini">
               <summary>How we counted</summary>
-              <p>GitHub code search on 17 November 2026. Queries: <code>DOTENV_PUBLIC_KEY</code> and <code>DOTENV_PUBLIC_KEY encrypted:</code>. Counts are approximate and cover indexed default branches only.</p>
+              <p>Two GitHub code searches on 17 November 2026. <span className="mono">DOTENV_PUBLIC_KEY</span> finds {FOUND.toLocaleString("en")} files that carry a dotenvx key; <span className="mono">DOTENV_PUBLIC_KEY encrypted:</span> finds the {ENCRYPTED.toLocaleString("en")} of them that hold encrypted values. Counts are approximate and cover indexed default branches only. The file above is an illustration of the format, not one of them.</p>
             </details>
-          </Reveal>
-        </div>
-      </section>
-    ),
-    () => (
-      <section className="sect" id="how">
-        <div className="wrap">
-          <Head n="02" title="Seal. Share. Revoke. Run." sub="Try it here. This runs Coffer's own code in your browser with three throwaway identities." />
-          <Reveal><LocalDemo /></Reveal>
-        </div>
-      </section>
-    ),
-    () => (
-      <section className="sect" id="cli">
-        <div className="wrap">
-          <Head n="03" title="Six commands in your terminal." />
-          <Reveal className="term" aria-label="Coffer commands">
-            <div className="term-bar" aria-hidden><span /><span /><span /></div>
-            <ul>
-              {CLI.map((c) => (
-                <li key={c.show}>
-                  <code><span className="term-p" aria-hidden>$</span>{c.show}</code>
-                  <span className="term-note">{c.note}</span>
-                  <CopyButton text={c.copy} />
-                </li>
-              ))}
-            </ul>
-            <p className="term-foot">Copy adds <code>npx github:jenzylove/coffer</code>: runs straight from GitHub, nothing to install.</p>
-          </Reveal>
-        </div>
-      </section>
-    ),
-    () => (
-      <section className="sect" id="qorechain">
-        <div className="wrap">
-          <Head n="04" title="An address is enough." sub="QoreChain holds everyone's public sealing key, so sharing is typing an address." />
-          <Reveal className="chainflow" aria-label="How sharing by address works">
-            <span className="cf-node"><span className="cf-dot" />Teammate's address</span>
-            <span className="cf-line" aria-hidden />
-            <span className="cf-node"><span className="cf-dot cf-blue" />Their key on QoreChain</span>
-            <span className="cf-line" aria-hidden />
-            <span className="cf-node cf-sealed"><span className="cf-disc" />Sealed to them</span>
-          </Reveal>
-          <Rows items={CHAIN} />
-        </div>
-      </section>
-    ),
-    () => (
-      <section className="sect" id="safety">
-        <div className="wrap">
-          <Head n="05" title="What it protects, and what it can't." />
-          <Rows items={SAFETY} />
-        </div>
-      </section>
-    ),
-    () => (
-      <section className="sect" id="faq">
-        <div className="wrap">
-          <Head n="06" title="Questions." />
-          <Rows items={FAQ} first />
-        </div>
-      </section>
-    ),
-    () => (
-      <section className="closing">
-        <div className="wrap closing-in">
-          <Reveal>
-            <div className="mini-seal" aria-hidden />
-            <h2>Seal your first file in a minute.</h2>
-            <p>Share it with our demo teammate, take it back, watch them get refused.</p>
-            <div className="closing-cta">
-              <Link to="/app" className="btn btn-primary btn-big">Open the app</Link>
-              <Link to="/proof" className="btn btn-ghost btn-big">See the proof</Link>
-            </div>
-          </Reveal>
-        </div>
-      </section>
-    ),
+          </div>
+        </Reveal>
+      </div>
+    </section>
+  ),
+  () => (
+    <section className="block block-story" id="how" aria-labelledby="h-how">
+      <div className="wrap">
+        <Reveal className="story-head">
+          <h2 id="h-how" className="h-section">How it works.</h2>
+          <p className="lead">Five steps. The document on the right is computed in your browser as you reach each one.</p>
+        </Reveal>
+      </div>
+      <Story />
+    </section>
+  ),
+  () => (
+    <section className="block" id="scan" aria-labelledby="h-scan">
+      <div className="wrap">
+        <Reveal>
+          <h2 id="h-scan" className="h-section">Is your repo already leaking?</h2>
+          <p className="lead">Paste a public repo. We list every env file in it and say who can read it.</p>
+        </Reveal>
+        <Reveal><ScanDoor /></Reveal>
+      </div>
+    </section>
+  ),
+  () => (
+    <section className="block" id="qorechain" aria-labelledby="h-why">
+      <div className="wrap split">
+        <Reveal><h2 id="h-why" className="h-section">Why QoreChain.</h2><p className="lead">An address is enough, because the chain holds everyone's public keys and every record.</p></Reveal>
+        <Reveal as="ol" className="why">
+          {WHY.map((w, i) => (
+            <li key={w.q}>
+              <span className="mono why-n">{String(i + 1).padStart(2, "0")}</span>
+              <span className="why-body"><strong>{w.q}</strong><span>{w.a}</span></span>
+            </li>
+          ))}
+        </Reveal>
+      </div>
+    </section>
+  ),
+  () => (
+    <section className="block" id="safety" aria-labelledby="h-safety">
+      <div className="wrap split">
+        <Reveal><h2 id="h-safety" className="h-section">Safety, in plain words.</h2></Reveal>
+        <Reveal><Rows items={SAFETY} first /></Reveal>
+      </div>
+    </section>
+  ),
+  () => (
+    <section className="block" id="faq" aria-labelledby="h-faq">
+      <div className="wrap split">
+        <Reveal><h2 id="h-faq" className="h-section">Questions.</h2></Reveal>
+        <Reveal><Rows items={FAQ} first /></Reveal>
+      </div>
+    </section>
+  ),
+  () => (
+    <section className="block closing" aria-labelledby="h-close">
+      <div className="wrap">
+        <Reveal>
+          <h2 id="h-close" className="h-display closing-t">Seal your first file in a minute.</h2>
+          <p className="lead">Make an address, seal a .env, share it with our demo teammate, then take it back.</p>
+          <div className="actions"><Link to="/app" className="btn">Open the app</Link></div>
+        </Reveal>
+      </div>
+    </section>
+  ),
 ];
 
 export default function LandingRest() {
@@ -163,6 +145,7 @@ export default function LandingRest() {
     if (n >= SECTIONS.length) return;
     const w = window as any;
     const next = () => startTransition(() => setN((x) => x + 1));
+    // cancel only the kind of handle we made: clearTimeout on an idle id can kill an unrelated timer
     const idle = !!w.requestIdleCallback;
     const h = idle ? w.requestIdleCallback(next, { timeout: 600 }) : setTimeout(next, 80);
     return () => { if (idle) w.cancelIdleCallback(h); else clearTimeout(h); };

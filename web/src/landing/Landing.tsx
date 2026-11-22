@@ -1,7 +1,6 @@
 import { Suspense, lazy, startTransition, useEffect, useState } from "react";
 import { Page } from "../components/Chrome.tsx";
 import { Hero } from "./Hero.tsx";
-import { ScanDoor } from "./ScanDoor.tsx";
 
 const Rest = lazy(() => import("./LandingRest.tsx"));
 
@@ -23,7 +22,6 @@ export function Landing() {
   return (
     <Page>
       <Hero />
-      <section className="doorbar" aria-label="Scan a repo"><div className="wrap"><ScanDoor /></div></section>
       {rest ? <Suspense fallback={<div className="rest-hold" />}><Rest /></Suspense> : <div className="rest-hold" />}
     </Page>
   );

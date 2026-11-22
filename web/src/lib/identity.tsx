@@ -5,6 +5,7 @@ import type { Identity } from "../../../src/core/identity.ts";
 import type { AccountStatus } from "../../../src/chain/qore.ts";
 import { net, errText } from "./net.ts";
 import { work } from "./crypto.ts";
+import { accountStatus } from "./chain.ts";
 
 const KEY = "coffer.identity";
 
@@ -64,8 +65,7 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     if (!id) return null;
     setChecking(true);
     try {
-      const { accountStatus } = await import("../../../src/chain/qore.ts");
-      const st = await accountStatus(net, id.address, id.sealKeys.mlkemPublicKey);
+      const st = await accountStatus(id.address, id.sealKeys.mlkemPublicKey);
       setStatus(st);
       setStatusError(null);
       return st;
@@ -98,6 +98,11 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
   const value = useMemo<Ctx>(() => ({ phrase, id, deriving, status, statusError, checking, create, restore, forget, refresh }),
     [phrase, id, deriving, status, statusError, checking, create, restore, forget, refresh]);
   return <IdentityContext.Provider value={value}>{children}</IdentityContext.Provider>;
+}
+
+/** The identity when a provider is present (the app), otherwise null (landing, proof). */
+export function useIdentityMaybe(): Ctx | null {
+  return useContext(IdentityContext);
 }
 
 export function useIdentity(): Ctx {

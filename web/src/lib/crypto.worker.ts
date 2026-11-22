@@ -1,7 +1,6 @@
 // All heavy crypto runs here, off the main thread: ML-KEM key generation,
 // sealing and opening, ML-DSA signing and checking, and recovery phrase
 // derivation. Same functions the CLI uses (src/core); nothing reimplemented.
-import { generateSealKeys, seal, open, toBase64Url, isQoreSealError } from "@qorechain/qoreseal";
 import type { SealKeyPair } from "@qorechain/qoreseal";
 import {
   createCoffer, shareCoffer, revokeCoffer, openCoffer, verifyCoffer, formatCoffer, parseCoffer,
@@ -9,17 +8,16 @@ import {
 } from "../../../src/core/vault.ts";
 import { identityFromMnemonic, newMnemonic, type Identity } from "../../../src/core/identity.ts";
 import { parseDotenv, serializeDotenv } from "../../../src/core/dotenv.ts";
+import { accountStatus, fetchReader, fetchPqKeys, grantHistory, registerIdentity, recordGrant, type Grant, type Network } from "../../../src/chain/qore.ts";
+
+// QoreChain goes through our own server (/rest); relative URLs resolve to this origin in the worker too
+const NET: Network = { chainId: "qorechain-diana", rest: "/rest" };
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 const CHAIN = "qorechain-diana";
 
-// ---- hero: keys made once per page view, a fresh seal every loop -------------
-const HERO = { chainId: CHAIN, purpose: "coffer:hero" };
-let hero: { reader: SealKeyPair; removed: SealKeyPair; plain: Uint8Array; env?: Uint8Array } | null = null;
-const chunks = (env: Uint8Array) => { const b = toBase64Url(env.slice(-60)); return [b.slice(0, 18), b.slice(18, 36), b.slice(36, 54)]; };
-
-// ---- landing demo: three throwaway identities ----------------------------------
+// ---- landing story: three throwaway identities (you, Ada, Sam) -----------------
 type Who = "you" | "one" | "two";
 let demo: { ids: Record<Who, Identity>; file?: ReturnType<typeof createCoffer> } | null = null;
 function canOpen(f: ReturnType<typeof createCoffer>) {
@@ -32,35 +30,20 @@ function canOpen(f: ReturnType<typeof createCoffer>) {
 }
 const namesOf = (p: Uint8Array) => parseDotenv(dec.decode(p)).map((e) => e.key);
 
-const ops: Record<string, (a: any) => unknown> = {
-  /** The GPU's name, checked here so creating a probe context never blocks the page. */
-  gpu() {
-    try {
-      const gl = new OffscreenCanvas(1, 1).getContext("webgl2") as WebGL2RenderingContext | null;
-      if (!gl) return null;
-      const info = gl.getExtension("WEBGL_debug_renderer_info");
-      const name = String(info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
-      return name;
-    } catch { return null; }
-  },
-  heroInit({ lines }: { lines: string[] }) {
-    if (!hero) hero = { reader: generateSealKeys(), removed: generateSealKeys(), plain: enc.encode(lines.join("\n")) };
-    return true;
-  },
-  heroSeal({ both }: { both: boolean }) {
-    const h = hero!;
-    const recipients = [{ mlkemPublicKey: h.reader.mlkemPublicKey }, ...(both ? [{ mlkemPublicKey: h.removed.mlkemPublicKey }] : [])];
-    h.env = seal({ ...HERO, mode: "mlkem", plaintext: h.plain, recipients });
-    return { cipher: chunks(h.env), bytes: h.env.length };
-  },
-  heroOpen() {
-    return dec.decode(open({ ...HERO, envelope: hero!.env!, keys: hero!.reader })).split("\n").map((l) => l.split("=")[0] ?? "");
-  },
-  /** "refused" only when the real open throws NOT_A_RECIPIENT. */
-  heroRefuse() {
-    try { open({ ...HERO, envelope: hero!.env!, keys: hero!.removed }); return "opened"; }
-    catch (e) { return isQoreSealError(e, "NOT_A_RECIPIENT") ? "refused" : "error"; }
+type Progress = (text: string, hash?: string) => void;
+const ops: Record<string, (a: any, progress: Progress) => unknown> = {
+  // ---- QoreChain: reads, setup and records, all off the main thread ----
+  accountStatus: ({ address, mlkem }: { address: string; mlkem?: Uint8Array }) => accountStatus(NET, address, mlkem),
+  fetchReader: ({ address }: { address: string }) => fetchReader(NET, address),
+  fetchPqKeys: ({ addresses }: { addresses: string[] }) => fetchPqKeys(NET, addresses),
+  grantHistory: ({ owner, id }: { owner: string; id?: string }) => grantHistory(NET, owner, id),
+  registerIdentity: ({ id }: { id: Identity }, progress) => registerIdentity(NET, id, (s, tx) => progress(s, tx?.hash)),
+  recordGrant: ({ owner, grant }: { owner: Identity; grant: Grant }) => recordGrant(NET, owner, grant),
+
+  /** The story's people: you (owner), Ada and Sam. Real throwaway identities. */
+  demoInit() {
+    if (!demo) { const make = () => identityFromMnemonic(newMnemonic()); demo = { ids: { you: make(), one: make(), two: make() } }; }
+    return { you: demo.ids.you.address, ada: demo.ids.one.address, sam: demo.ids.two.address };
   },
 
   demoSeal({ env }: { env: string }) {
@@ -74,7 +57,9 @@ const ops: Record<string, (a: any) => unknown> = {
   demoShare() {
     const ids = demo!.ids;
     demo!.file = shareCoffer(demo!.file!, ids.you, ids.you.sealKeys, [ids.one, ids.two].map((i) => ({ address: i.address, mlkemPublicKey: i.sealKeys.mlkemPublicKey })));
-    return { can: canOpen(demo!.file), text: formatCoffer(demo!.file) };
+    // what Ada reads once she is a reader: the real decrypted lines
+    const ada = dec.decode(openCoffer(demo!.file, ids.one.sealKeys)).split("\n").filter(Boolean);
+    return { can: canOpen(demo!.file), text: formatCoffer(demo!.file), ada };
   },
   demoRevoke() {
     const ids = demo!.ids;
@@ -120,7 +105,8 @@ self.onmessage = async (e: MessageEvent<{ id: number; op: string; args: unknown 
   try {
     const fn = ops[op];
     if (!fn) throw new Error(`unknown operation ${op}`);
-    (self as unknown as Worker).postMessage({ id, ok: true, value: await fn(args) });
+    const progress: Progress = (text, hash) => (self as unknown as Worker).postMessage({ id, progress: { text, hash } });
+    (self as unknown as Worker).postMessage({ id, ok: true, value: await fn(args, progress) });
   } catch (err) {
     const x = err as { message?: string; code?: string };
     (self as unknown as Worker).postMessage({ id, ok: false, message: x?.message ?? String(err), code: x?.code });

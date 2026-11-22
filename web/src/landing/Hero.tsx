@@ -1,155 +1,106 @@
-// The hero: a glass seal that seals, opens and refuses for real. The crypto runs
-// in a Web Worker (fresh ML-KEM-1024 keys once per visit, a fresh seal each loop),
-// so the page never blocks. The stage is plain DOM and CSS by default; on a
-// capable desktop the three.js glass takes over once the page is idle, and hands
-// back to CSS if it can't hold 40 fps.
+// The hero: a classified document, driven by real crypto in the hero's own
+// worker. The values are sealed to Ada and Sam, Ada reads them (decrypted for
+// real), then Sam is removed and refused (only after the real NOT_A_RECIPIENT).
 import { useEffect, useRef, useState } from "react";
-import type { Glass } from "./glass.ts";
-import { work, workWithin } from "../lib/crypto.ts";
+import { workWithin } from "../lib/crypto.ts";
+import { short } from "../lib/net.ts";
+import { Link } from "../lib/router.tsx";
+import { Bar, EnvLine, Sheet, Stamp, splitLine, trunc } from "../components/Doc.tsx";
 
 const PLAIN = [
-  "OPENAI_API_KEY=sk-proj-••••••••",
-  "DATABASE_URL=postgres://app:••••@db/main",
-  "STRIPE_SECRET_KEY=sk_live_••••••",
+  "DATABASE_URL=postgres://app:9fQ2v@db/main",
+  "OPENAI_API_KEY=sk-proj-4Zt8w1Lq0aB",
+  "STRIPE_KEY=sk_live_51Hx7K2mN",
 ];
-
-type Phase = "plain" | "sealed" | "revoked" | "opened" | "refused" | "failed";
-const HOLD: Record<string, number> = { plain: 2200, sealed: 2600, revoked: 2400, opened: 3400, refused: 3200 };
-const CAPTION: Record<Phase, string> = {
-  plain: "A plain .env",
-  sealed: "Sealed to two readers",
-  revoked: "One reader removed, sealed again",
-  opened: "The reader who stays opens it",
-  refused: "The removed reader is refused",
-  failed: "The live demo stopped: this browser could not run the sealing code",
-};
-
-/** Cheap checks on the page; the GPU check runs in the worker so it never blocks. */
-async function wantsGl(): Promise<boolean> {
-  if (new URLSearchParams(location.search).has("nogl")) return false;
-  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return false;
-  if (matchMedia("(pointer: coarse)").matches || innerWidth < 900) return false;
-  if ((navigator as { connection?: { saveData?: boolean } }).connection?.saveData) return false;
-  if ((navigator.hardwareConcurrency ?? 4) <= 2) return false;
-  if (typeof OffscreenCanvas === "undefined") return false;
-  const name = await work<string | null>("gpu").catch(() => null);
-  // a software renderer can't hold the glass at 40 fps: keep the CSS stage
-  return !!name && !/swiftshader|llvmpipe|software|basic render/i.test(name);
-}
-
-const idle = (fn: () => void) => ("requestIdleCallback" in window ? (window as any).requestIdleCallback(fn, { timeout: 2500 }) : setTimeout(fn, 1200));
+type Phase = "plain" | "sealed" | "ada" | "sam";
+const HOLD: Record<Phase, number> = { plain: 2200, sealed: 2600, ada: 3000, sam: 3400 };
 
 export function Hero() {
   const section = useRef<HTMLElement>(null);
-  const canvas = useRef<HTMLCanvasElement>(null);
-  const glass = useRef<Glass | null>(null);
-  const visible = useRef(true);
-  const [gl, setGl] = useState(false);
   const [phase, setPhase] = useState<Phase>("plain");
-  const [run, setRun] = useState(0);
-  const [cipher, setCipher] = useState<string[]>([]);
-  const [names, setNames] = useState<string[]>([]);
+  const [cycle, setCycle] = useState(0);
+  const [who, setWho] = useState<{ ada: string; sam: string } | null>(null);
+  const [ada, setAda] = useState<string[] | null>(null);
+  const [refused, setRefused] = useState(false);
+  const [failed, setFailed] = useState(false);
+  // the sheet lays out one frame after the headline, so the first layout stays small (its space is reserved)
+  const [docReady, setDocReady] = useState(false);
+  useEffect(() => { const r = requestAnimationFrame(() => setTimeout(() => setDocReady(true), 0)); return () => cancelAnimationFrame(r); }, []);
 
-  // visibility: pause everything when the hero is off screen or the tab is hidden
-  useEffect(() => {
-    const el = section.current;
-    if (!el) return;
-    const io = new IntersectionObserver(([e]) => { visible.current = !!e?.isIntersecting; });
-    io.observe(el);
-    return () => io.disconnect();
-  }, []);
-
-  // three.js, only when it can hold up, and only after the page is idle
-  useEffect(() => {
-    let off = false;
-    const start = () => idle(async () => {
-      if (!(await wantsGl()) || off) return;
-      import("./glass.ts").then(({ createGlass }) => {
-        if (off || !canvas.current) return;
-        const g = createGlass(canvas.current, { onSlow: () => { g?.dispose(); glass.current = null; setGl(false); } });
-        if (!g) return;
-        glass.current = g;
-        setGl(true);
-      }).catch(() => {});
-    });
-    if (document.readyState === "complete") start(); else window.addEventListener("load", start, { once: true });
-    return () => { off = true; glass.current?.dispose(); glass.current = null; };
-  }, []);
-
-  // the real loop, in the worker
   useEffect(() => {
     let stop = false;
     const stretch = new URLSearchParams(location.search).has("slow") ? 4 : 1;
     // measure the real position each time: a stale observer flag must never freeze the loop
     const onScreen = () => { const b = section.current?.getBoundingClientRect(); return !!b && b.bottom > 0 && b.top < innerHeight; };
     const ready = async () => { while (!stop && (!onScreen() || document.hidden)) await new Promise((ok) => setTimeout(ok, 400)); };
-    const call = <T,>(op: string, args: unknown = {}) => workWithin<T>(op, args, 6000);
     const wait = async (ms: number) => { await new Promise((ok) => setTimeout(ok, ms * stretch)); await ready(); };
-    const show = (p: Phase) => { setPhase(p); setRun((r) => r + 1); };
+    const call = <T,>(op: string, args: unknown = {}, ms = 8000) => workWithin<T>(op, args, ms);
     (async () => {
       let restarts = 0;
       while (!stop && restarts < 5) {
-      try {
-        await call("heroInit", { lines: PLAIN });
-        while (!stop) {
-          show("plain"); setNames([]); glass.current?.plain(PLAIN);
-          await wait(HOLD.plain!); if (stop) return;
-          const a = await call<{ cipher: string[] }>("heroSeal", { both: true });
-          setCipher(a.cipher); show("sealed"); glass.current?.seal(a.cipher);
-          await wait(HOLD.sealed!); if (stop) return;
-          const b = await call<{ cipher: string[] }>("heroSeal", { both: false });
-          setCipher(b.cipher); show("revoked"); glass.current?.seal(b.cipher);
-          await wait(HOLD.revoked!); if (stop) return;
-          const n = await call<string[]>("heroOpen");
-          setNames(n); show("opened"); glass.current?.open(n);
-          await wait(HOLD.opened!); if (stop) return;
-          if ((await call<string>("heroRefuse")) !== "refused") { show("failed"); return; } // never fake a refusal
-          setNames([]); show("refused"); glass.current?.refuse();
-          await wait(HOLD.refused!);
+        try {
+          const w = await call<{ ada: string; sam: string }>("heroInit", { lines: PLAIN }, 30000);
+          setWho(w);
+          while (!stop) {
+            setAda(null); setRefused(false); setPhase("plain"); setCycle((c) => c + 1);
+            await wait(HOLD.plain); if (stop) return;
+            await call("heroSeal", { both: true });
+            setPhase("sealed");
+            await wait(HOLD.sealed); if (stop) return;
+            const lines = await call<string[]>("heroOpen");
+            setAda(lines); setPhase("ada");
+            await wait(HOLD.ada); if (stop) return;
+            await call("heroSeal", { both: false }); // sealed again without Sam
+            const r = await call<string>("heroRefuse");
+            if (r !== "refused") { setFailed(true); return; } // never fake a refusal
+            setRefused(true); setPhase("sam");
+            await wait(HOLD.sam);
+          }
+        } catch (e) {
+          // a stuck worker was restarted: begin a fresh real loop instead of freezing
+          if ((e as { code?: string })?.code === "TIMEOUT" || /restarted/.test(String((e as Error)?.message))) { restarts++; continue; }
+          if (!stop) setFailed(true);
+          return;
         }
-      } catch (e) {
-        // a stuck worker was restarted: begin a fresh real loop instead of freezing
-        if ((e as { code?: string })?.code === "TIMEOUT" || /restarted/.test(String((e as Error)?.message))) { restarts++; continue; }
-        if (!stop) show("failed");
-        return;
-      }
       }
     })();
     return () => { stop = true; };
   }, []);
 
-  const sealedNow = phase === "sealed" || phase === "revoked" || phase === "opened" || phase === "refused";
+  const sealed = phase !== "plain";
   return (
     <section className="hero" aria-labelledby="hero-title" ref={section}>
-      <div className="studio" aria-hidden />
-      <div className={`screen ${gl ? "is-gl" : "is-css"}`}>
-        <canvas ref={canvas} className="screen-canvas" aria-hidden />
-        {!gl && (
-          <div className={`cstage cs-${phase}`} aria-hidden>
-            <div className="cs-lines">{PLAIN.map((l) => <span key={l}>{l}</span>)}</div>
-            <div className="cs-names">{names.map((n, i) => <span key={n} style={{ transitionDelay: `${i * 120}ms` }}>{n}</span>)}</div>
-            <div className="cs-seal">
-              <span className="cs-rim cs-rim2" /><span className="cs-rim" />
-              <span className="cs-disc">
-                <span className="cs-cipher">{sealedNow && cipher.map((c, i) => <span key={c + i}>{c}</span>)}</span>
-              </span>
-              <span className="cs-ripple" key={run} />
-            </div>
-            <span className="cs-token cs-reader"><i />Reader</span>
-            <span className="cs-token cs-removed"><i />{phase === "refused" ? "Refused: not a reader" : "Removed reader"}</span>
+      <div className="wrap hero-in">
+        <div className="hero-copy">
+          <h1 id="hero-title" className="h-display hero-title"><span className="nw">Commit your .env.</span> Only your team can read it.</h1>
+          <p className="hero-sub">Coffer seals every value to your teammates' QoreChain addresses. Anyone else who opens the repo sees <span className="bar bar-sub" aria-label="a black bar" role="img" />. Remove someone and they can't open the next version.</p>
+          <div className="actions">
+            <Link to="/app" className="btn">Seal a file</Link>
+            <Link to="/#how" className="link">See how it works</Link>
           </div>
-        )}
-        <div className="screen-copy">
-          <h1 id="hero-title">Your .env, sealed to your team.</h1>
-          <p>Commit it to any repo. Only the addresses you name can open it. The lock is built to hold against quantum computers.</p>
         </div>
-        <div className={`screen-state state-${phase}`} aria-live="polite">
-          <span className="state-dot" aria-hidden />
-          <span>{CAPTION[phase]}</span>
-          <span className="state-live">live in your browser</span>
+        <div className="hero-doc">
+          {docReady && <><Sheet
+            left={sealed ? ".env.coffer, in a public repo" : ".env, plain text"}
+            right={sealed ? `readers: ${phase === "sam" ? 1 : 2}` : "not sealed"}
+            stamp={sealed ? <Stamp key={`s${cycle}`}>Sealed</Stamp> : null}
+          >
+            {PLAIN.map((l, i) => { const [k, v] = splitLine(l); return <EnvLine key={k} name={k} value={v} sealed={sealed} delay={i * 140} />; })}
+            <div className="views">
+              <div className="view">
+                <p className="view-who"><span>Ada{who && <span className="view-addr">{short(who.ada, 6, 2)}</span>}</span><span className={ada ? "ok" : "dim"}>{ada ? "can read" : sealed ? "reader" : "plain text"}</span></p>
+                {(ada ?? PLAIN).map((l) => { const [k, v] = splitLine(l); return <p key={k} className="view-line">{k}={ada || !sealed ? trunc(v) : <Bar w={Math.min(12, Math.max(6, v.length / 2))} />}</p>; })}
+              </div>
+              <div className="view">
+                <p className="view-who"><span>Sam{who && <span className="view-addr">{short(who.sam, 6, 2)}</span>}</span><span className={phase === "sam" ? "no" : "dim"}>{phase === "sam" ? "removed" : sealed ? "reader" : "plain text"}</span></p>
+                {PLAIN.map((l) => { const [k, v] = splitLine(l); return <p key={k} className="view-line">{k}={sealed ? <Bar w={Math.min(12, Math.max(6, v.length / 2))} /> : trunc(v)}</p>; })}
+                {refused && <Stamp key={`r${cycle}`} tone="red" className="view-stamp">Refused</Stamp>}
+              </div>
+            </div>
+          </Sheet>
+          <p className="note">{failed ? "The live demo stopped: this browser couldn't run the sealing code." : "Live in your browser: fresh keys for Ada and Sam, sealed with ML-KEM-1024."}</p></>}
         </div>
       </div>
-      <div className="slabs" aria-hidden><span /><span /></div>
     </section>
   );
 }
