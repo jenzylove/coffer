@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { Page } from "../components/Chrome.tsx";
 import { Bar, Sheet, Stamp } from "../components/Doc.tsx";
 import { IdentityProvider, useIdentity, isReady } from "../lib/identity.tsx";
-import { api, download, qor, short } from "../lib/net.ts";
+import { api, download, errCode, qor, short } from "../lib/net.ts";
 import { SETUP_UQOR, dripAndWait, record, remember } from "../lib/ops.ts";
 import { work } from "../lib/crypto.ts";
 import { parseCoffer, type CofferFile } from "../../../src/core/vault.ts";
@@ -224,7 +224,7 @@ function Dashboard() {
               </button>
             );
           })}
-          <button role="tab" aria-selected={view.kind === "seal"} className="btn btn-block" onClick={() => pick({ kind: "seal" })}>Seal a file</button>
+          <button role="tab" aria-selected={view.kind === "seal"} className={view.kind === "seal" ? "btn-outline btn-block" : "btn btn-block"} onClick={() => pick({ kind: "seal" })}>Seal a file</button>
           <button role="tab" aria-selected={view.kind === "open"} className="file-row file-open" onClick={() => pick({ kind: "open" })}>
             <span className="file-name">Open a file</span>
             <span className="file-meta">Paste or drop a .env.coffer</span>
@@ -258,7 +258,7 @@ function KeysBlock() {
       <Result>Ready. Anyone can seal files to you now.</Result>
       <div className="acts">
         <button className="link" onClick={() => setShow((v) => !v)} aria-expanded={show}>{show ? "Hide recovery phrase" : "Show recovery phrase"}</button>
-        <button className="link" onClick={() => download("coffer-recovery-phrase.txt", `Coffer recovery phrase for ${id.address}\nIt opens every Coffer file shared with this address. Keep it private.\n\n${phrase}\n`)}>Download</button>
+        <button className="link" onClick={() => download("coffer-recovery-phrase.txt", `Coffer recovery phrase for ${id.address}\nIt opens every Coffer file shared with this address. Keep it private.\n\n${phrase}\n`)}>Save it as a file</button>
       </div>
       <p className="muted small">Your recovery phrase opens everything shared with you. Keep it private.</p>
       {show && <p className="phrase mono">{phrase}</p>}
@@ -280,6 +280,29 @@ function KeysBlock() {
 
 function readHint(): ImportHint | null {
   try { const t = sessionStorage.getItem(IMPORT_KEY); return t ? JSON.parse(t) : null; } catch { return null; }
+}
+
+/** A teammate needs a Coffer address before files can be sealed to them: this copies a short invite. */
+function InviteButton({ className = "btn-outline" }: { className?: string }) {
+  const [done, setDone] = useState(false);
+  const text = `I'm sharing a sealed .env with you on Coffer. Open ${location.origin}/app, make an address (free, about 30 seconds), and send me the qor1 address it shows you.`;
+  return (
+    <button type="button" className={className} onClick={async () => { try { await navigator.clipboard.writeText(text); setDone(true); setTimeout(() => setDone(false), 1800); } catch { /* clipboard blocked */ } }}>
+      {done ? "Invite copied" : "Copy an invite"}
+    </button>
+  );
+}
+
+/** The three steps of using Coffer, so the next one is always in view. */
+function Flow({ at }: { at: number }) {
+  const steps = ["Paste your .env", "Seal it", "Share it by address"];
+  return (
+    <ol className="flow" aria-label="Steps">
+      {steps.map((t, i) => (
+        <li key={t} className={i + 1 === at ? "on" : i + 1 < at ? "done" : ""} aria-current={i + 1 === at ? "step" : undefined}><b>{i + 1 < at ? "✓" : i + 1}</b>{t}</li>
+      ))}
+    </ol>
+  );
 }
 
 function SealPanel({ onSealed }: { onSealed: (text: string, tx?: string) => void }) {
@@ -345,6 +368,7 @@ function SealPanel({ onSealed }: { onSealed: (text: string, tx?: string) => void
   return (
     <section className="panel" id="seal" aria-labelledby="h-seal">
       <h2 id="h-seal" className="h-section">Seal a file.</h2>
+      <Flow at={preview.entries?.length ? 2 : 1} />
       {hint && (
         <div className="hintline">
           <p>Moving <span className="mono">{hint.path}</span> from <span className="mono">{hint.repo}</span>.{" "}
@@ -482,8 +506,10 @@ function FileDetail({ stored, onChange }: { stored: Stored; onChange: (patch: Pa
   const readers = [...file.readers].sort((a, b) => (a === file.owner ? -1 : b === file.owner ? 1 : 0));
   const removed = (stored.removed ?? []).filter((a) => !file.readers.includes(a));
 
+  const shared = file.readers.length > 1 || removed.length > 0;
   return (
     <div className="file">
+      {!shared && <Flow at={3} />}
       <section id="seal" aria-labelledby="h-file">
         <Sheet
           className="sheet-file"
@@ -513,6 +539,7 @@ function FileDetail({ stored, onChange }: { stored: Stored; onChange: (patch: Pa
 
       <section className="file-sec" id="share" aria-labelledby="h-to">
         <h3 id="h-to" className="label">To</h3>
+        {!shared && <p className="next">Next: add a teammate's Coffer address below. They open the file with their own key, and you can remove them any time. No address yet? <InviteButton className="link" /></p>}
         <ul className="to-list">
           {readers.map((a) => (
             <li key={a}>
@@ -531,7 +558,7 @@ function FileDetail({ stored, onChange }: { stored: Stored; onChange: (patch: Pa
         </ul>
         <form className="line-form" onSubmit={(e) => { e.preventDefault(); const a = addr.trim(); if (a) void share(a); }}>
           <label htmlFor="addr" className="sr">Add someone by address</label>
-          <input id="addr" className="mono" value={addr} onChange={(e) => setAddr(e.target.value)} placeholder="Add someone by address: qor1…" spellCheck={false} autoComplete="off" />
+          <input id="addr" className="mono" value={addr} onChange={(e) => setAddr(e.target.value)} placeholder="Paste a teammate's Coffer address: qor1…" spellCheck={false} autoComplete="off" />
           <button className="btn" disabled={!!busy || !addr.trim()}>{busy === "share" ? "Sharing" : "Share"}</button>
         </form>
         <div className="mate-row">
@@ -544,7 +571,12 @@ function FileDetail({ stored, onChange }: { stored: Stored; onChange: (patch: Pa
           <span className="muted small">A test teammate run by Coffer, so you can try sharing and revoking alone.</span>
         </div>
         {busy && <Progress lines={log.lines} />}
-        {err !== null && <Problem error={err} />}
+        {err !== null && errCode(err) === "NO_KEM_KEY" ? (
+          <div className="problem invite">
+            <p><b>This address can't receive sealed files yet.</b> Sealing needs the reader's public sealing key, and a wallet address on its own has never put one on QoreChain. Send them an invite: they open Coffer once (free, about 30 seconds) and send you the address it gives them.</p>
+            <InviteButton />
+          </div>
+        ) : err !== null && <Problem error={err} />}
       </section>
 
       <section className="file-sec" id="prove" aria-labelledby="h-prove">

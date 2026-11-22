@@ -89,7 +89,7 @@ export function explain(code: string | undefined, message: string): string {
     case "UNKNOWN_KEY": return "Whoever signed this file hasn't set up Coffer, so it can't be checked.";
     case "WRITER_NOT_READER": return "The last person to change this file isn't on its list.";
     case "BAD_FORMAT": return "This isn't a Coffer file.";
-    case "NO_KEM_KEY": return "That address hasn't set up Coffer yet. Ask them to open the Coffer app first.";
+    case "NO_KEM_KEY": return "This address can't receive sealed files yet: it has no sealing key on QoreChain. They get one by opening Coffer once.";
     case "BAD_ADDRESS": return "That doesn't look like a QoreChain address. It starts with qor1.";
     case "NOT_OWNER": return "Only the person who sealed this file can change who reads it.";
     case "TX_REFUSED": case "TX_FAILED": return "QoreChain didn't accept the transaction. Try again in a moment.";

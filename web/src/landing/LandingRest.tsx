@@ -10,7 +10,7 @@ import { ScanDoor } from "./ScanDoor.tsx";
 const FOUND = 2284, ENCRYPTED = 1716;
 
 const WHY: { q: string; a: string }[] = [
-  { q: "Every address has a public sealing key on chain.", a: "So you can lock a file to a teammate knowing only their address. No key swapping, no invite links." },
+  { q: "Your teammates' sealing keys are public, on chain.", a: "When a teammate opens Coffer, their public sealing key goes on QoreChain under their address. From then on you lock a file to them knowing only that address. No key swapping." },
   { q: "Every change is signed with a quantum safe key.", a: "The owner signs who can read and the last writer signs what was written, with ML-DSA-87 keys registered on QoreChain." },
   { q: "Every share and revoke is recorded, so old copies are refused.", a: "Before opening, Coffer reads the record. A copy restored from before a revoke is refused." },
 ];

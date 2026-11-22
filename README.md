@@ -49,7 +49,7 @@
 share / revoke ──► new epoch, reseal, and a signed record on QoreChain
 ```
 
-- **Sharing needs only an address.** Every QoreChain account can publish an ML-KEM-1024 key in the chain's KEM registry (`MsgRegisterKEMKey`, signed by its ML-DSA-87 key). Coffer reads it from `/qorechain/pqc/v1/kem/{address}` and seals to it. No key swapping, no invite links, no server holding secrets.
+- **Sharing needs only an address.** Every QoreChain account can publish an ML-KEM-1024 key in the chain's KEM registry (`MsgRegisterKEMKey`, signed by its ML-DSA-87 key). Coffer reads it from `/qorechain/pqc/v1/kem/{address}` and seals to it. A teammate publishes theirs once, when they first open Coffer (the relayer pays); a wallet address that never published one can't be sealed to, and the app offers a one tap invite. No key swapping, no server holding secrets.
 - **Revoking means something.** A removed reader never gets the next epoch key, so they cannot open this version or any later one. Coffer lists every key in the file so you can rotate what they already saw.
 - **Tampering is caught.** The owner's ML-DSA-87 signature covers the reader list; the writer's covers the contents. Readers check both against the keys registered on chain. A hand-edited reader list, or a file relabelled with someone else's name, is refused. A valid file from a different owner is a different matter: the CLI remembers each file's owner the first time it opens it and refuses a copy from anyone else.
 - **Rollbacks are caught.** Every share and revoke is a hybrid-signed transaction whose memo names the file and its epoch. Before opening, Coffer reads those records, so restoring a copy from before a revoke is refused.

@@ -21,7 +21,7 @@ interface Facts {
 const STEPS: { title: string; line: string }[] = [
   { title: "Your .env is plain text.", line: "Anyone who sees the file reads every key." },
   { title: "Seal it.", line: "Coffer locks the values to the people you choose. The file is safe to commit." },
-  { title: "Share it by address.", line: "Type a teammate's QoreChain address. Their public key is already on chain, so there's nothing to swap." },
+  { title: "Share it by address.", line: "Your teammate opens Coffer once, which puts their public key on QoreChain. Then you add them by their address, with nothing to swap." },
   { title: "Take it back.", line: "Remove someone and the file is locked again under a key they never get." },
   { title: "Run it.", line: "Your app gets the secrets in memory. Nothing is written to disk." },
 ];
