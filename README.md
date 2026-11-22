@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>Push your secrets to GitHub. Only your team can open them.</b><br>
-  Your <code>.env</code> sealed with ML-KEM-1024 to your teammates' QoreChain wallets. Share by wallet address, take access back, and let the chain refuse old copies.
+  Your <code>.env</code> sealed with ML-KEM-1024 to your teammates' QoreChain wallets. Every open is a request QoreChain answers: remove someone, or lose a laptop, and nothing opens for that address any more, not even the copy it kept.
 </p>
 
 <p align="center">
@@ -50,13 +50,18 @@ your QoreX wallet ──signs──► recipient card (ML-KEM-1024 + X25519 keys
 share / remove ──► new epoch, reseal, one owner signature, recorded on chain
 ```
 
+- **Every open is a request the chain answers.** A file's contents need two pieces: the reader's own (sealed to them in the file) and a release piece sealed only to the file's keeper. To open, the reader's Coffer signs a request (with the wallet, or a device key the wallet approved for a day, so opens stay silent). The Coffer contract refuses it unless the reader is on the file's current list, then records the open with the release piece sealed to that reader. So:
+  - **Remove someone and nothing opens for them any more**, old copies included. With other secrets tools, whoever holds a copy and the key can open it forever.
+  - **A stolen laptop is one removal away from useless**, even with the files, the key and a client that skips every check.
+  - **Every open is on chain**, signed with ML-DSA-87: who opened which file, at which version, and when. `coffer status` and the app show it.
+  - **The keeper cannot read anything**: it holds only the release piece, never an epoch key. The contract, not the keeper, decides who gets it.
 - **Share with a wallet address.** QoreX cannot put an encryption key in QoreChain's KEM registry, and it cannot decrypt for apps. What it can do is sign a message with both of its keys. Coffer has it sign a QoreSeal recipient card ("seal to these keys"). The Coffer contract rebuilds the card text, reads the wallet's ML-DSA-87 key from the chain (0x0A02, proof of possession required) and verifies the signature (0x0A01). From then on anyone can seal to that wallet address. The opening keys stay in the teammate's browser; **Save my key file** moves them to another computer.
 - **Sharing delivers.** Each change carries the whole sealed file on chain, and the contract keeps a list of the files shared with each address. A teammate's Coffer (or `coffer inbox`) finds the file under their own address: no download, no copy, no commit needed.
 - **Invite anyone.** Paste an address that has no card yet and Coffer gives you an invite link. They connect QoreX and sign once; on your side their row turns into **Seal them in**.
 - **One signature per change.** Sealing, sharing and removing each ask the owner's wallet for exactly one approval. QoreX shows the file name and every address that can open it.
 - **The chain refuses old copies.** The contract binds each file to its owner and only lets its epoch go up. Before opening, Coffer compares the file with its head on chain: an old copy (with a removed reader still in it), a copy relabelled with another owner, or a copy QoreChain never saw is refused.
 - **Removing means something.** A removed reader never gets the next epoch key. Coffer lists every key in the file so you can change what they already saw at the provider.
-- **What QoreChain refuses, tested on testnet:** a forged card, a card from an account whose key has no proof of possession, a card older than the current one, a change signed by anyone but the owner, and an older epoch of a file.
+- **What QoreChain refuses, tested on testnet:** an open by anyone not on the file's current list (even with an old copy and the right key), a replayed open, a device past its approval, a forged card, a card from an account whose key has no proof of possession, a card older than the current one, a change signed by anyone but the owner, and an older epoch of a file. The full list is in [THREAT_MODEL.md](THREAT_MODEL.md).
 
 <p align="center"><img src="docs/media/prove.png" alt="The demo teammate opens the file, is removed, then refused" width="70%"></p>
 
@@ -66,7 +71,8 @@ share / remove ──► new epoch, reseal, one owner signature, recorded on cha
 |---|---|
 | QoreX `signArbitrary` (QoreSign message signing v1: secp256k1 + ML-DSA-87) | Signs recipient cards and every change of who can read a file |
 | QoreSeal recipient cards, hybrid mode, epoch keys | Sealing to teammates (ML-KEM-1024 + X25519); removal by new epochs |
-| EVM precompiles `pqcVerify` (0x0A01) and `pqcKeyStatus` (0x0A02) | The contract checks every card and every change on chain |
+| EVM precompiles `pqcVerify` (0x0A01) and `pqcKeyStatus` (0x0A02) | The contract checks every card, every change, every device approval and every open request on chain |
+| Contract state as the access list | `memberAt` decides at open time who may get a file's release piece; `opensOf` is the access log |
 | EVM contract and a scoped authorisation window | Cards and file heads; the poster account can only call the Coffer contract |
 | Hybrid native transactions, ML-DSA-87 key registration with proof of possession | Setup for accounts without QoreX (browser and CLI) |
 | KEM registry (`MsgRegisterKEMKey`) | Browser and CLI accounts also publish their ML-KEM key there, so any QoreSeal app can seal to them |

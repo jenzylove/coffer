@@ -4,7 +4,8 @@
 // this component's memory and appear one at a time, only on click.
 import { useState } from "react";
 import { useIdentity } from "../lib/identity.tsx";
-import { errCode, errText, short } from "../lib/net.ts";
+import { errCode, errText, explorerTx, short } from "../lib/net.ts";
+import { approveThisBrowser, openAsReader } from "../lib/opener.ts";
 import { explain } from "../lib/ops.ts";
 import { work } from "../lib/crypto.ts";
 import { parseCoffer, type ChainHead, type CofferFile } from "../../../src/core/vault.ts";
@@ -25,7 +26,9 @@ const VERDICT: Record<string, string> = {
 };
 
 export function OpenFile() {
-  const { address, keys } = useIdentity();
+  const { address, keys, kind, owner } = useIdentity();
+  const [needsDevice, setNeedsDevice] = useState(false);
+  const [openTx, setOpenTx] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [file, setFile] = useState<CofferFile | null>(null);
   const [check, setCheck] = useState<{ ok: true; head: ChainHead | null } | { ok: false; code?: string; msg: string } | null>(null);
@@ -51,12 +54,26 @@ export function OpenFile() {
     }
   }
 
+  /** The owner opens with its own copy; anyone else asks QoreChain, which records the open. */
   async function open() {
-    if (!file || !keys) return;
+    if (!file || !keys || !address) return;
+    setErr(null); setOpening(true); setNeedsDevice(false);
+    try {
+      if (file.owner === address) { setEntries(await work<DotenvEntry[]>("ownerOpen", { text, keys })); setOpenTx(null); }
+      else { const o = await openAsReader({ address, keys, kind, owner }, text, false); setEntries(o.entries); setOpenTx(o.hash); }
+    } catch (e) {
+      if (errCode(e) === "NEEDS_DEVICE") setNeedsDevice(true);
+      else setErr(e);
+    } finally {
+      setOpening(false);
+    }
+  }
+
+  async function approve() {
+    if (!address || !owner) return;
     setErr(null); setOpening(true);
-    try { setEntries(await work<DotenvEntry[]>("open", { text, keys })); }
-    catch (e) { setErr(e); }
-    finally { setOpening(false); }
+    try { await approveThisBrowser({ address, owner }); setOpening(false); await open(); }
+    catch (e) { setErr(e); setOpening(false); }
   }
 
   const isReader = !!file && !!address && file.readers.includes(address);
@@ -98,8 +115,16 @@ export function OpenFile() {
                   {address && <div className="acts"><CopyAction className="link" text={address} label="Copy my address" done="Address copied" /></div>}
                 </div>
               ) : !keys ? <Result>This browser doesn't have your key. Load your key file first.</Result>
-                : !entries ? <button className="btn" disabled={opening} onClick={open}>{opening ? "Opening" : "Open with my key"}</button>
-                  : <Values entries={entries} onClose={() => setEntries(null)} />}
+                : needsDevice ? (
+                  <div className="ready-line" role="status">
+                    <p>Approve this browser for a day (one signature in QoreX). Then files open here without asking.</p>
+                    <button className="btn" disabled={opening} onClick={() => void approve()}>{opening ? "Waiting for QoreX" : "Approve this browser"}</button>
+                  </div>
+                ) : !entries ? <button className="btn" disabled={opening} onClick={open}>{opening ? "Asking QoreChain" : "Open with my key"}</button>
+                  : <>
+                    <Values entries={entries} onClose={() => setEntries(null)} />
+                    {openTx && <p className="file-line"><span>Opened</span><span className="dot" aria-hidden>·</span><a className="link-sm" href={explorerTx(openTx)} target="_blank" rel="noreferrer">recorded on QoreChain</a></p>}
+                  </>}
             </div>
           )}
         </>

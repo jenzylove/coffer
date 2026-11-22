@@ -70,7 +70,8 @@ export interface Stored {
   /** After the last removal: who, and the names to change at the provider. */
   rotate?: { who: string; names: string[] };
 }
-const FILES = "coffer.files.v2";
+// v3: files whose every open is a request to QoreChain (format 3); older copies are not listed
+const FILES = "coffer.files.v3";
 export function loadFiles(): Stored[] {
   try { return (JSON.parse(localStorage.getItem(FILES) ?? "null") as Stored[] | null) ?? []; } catch { return []; }
 }
@@ -80,6 +81,12 @@ export function saveFiles(list: Stored[]) { try { localStorage.setItem(FILES, JS
 export function explain(code: string | undefined, message: string): string {
   switch (code) {
     case "SIGN_REJECTED": return "You closed QoreX without signing. Nothing changed.";
+    case "REFUSED_BY_CHAIN": return "QoreChain refused: you're not on this file's list any more.";
+    case "NEEDS_DEVICE": return "Approve this browser for a day first (one signature in QoreX).";
+    case "DEVICE_REFUSED": return `QoreChain didn't approve this browser. ${sentence(message)}`;
+    case "NOT_OPENED": return `QoreChain didn't release the file. ${sentence(message)}`;
+    case "NO_KEEPER": return "Opening through QoreChain isn't set up on this server yet.";
+    case "BAD_RELEASE": return "The piece QoreChain released doesn't open this copy.";
     case "SIGN_TIMEOUT": return "QoreX didn't answer, so nothing changed. Try again.";
     case "WALLET_GONE": return "QoreX isn't connected right now. Connect it and try again.";
     case "WALLET_ERROR": return `QoreX couldn't sign: ${message}`;

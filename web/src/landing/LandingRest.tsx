@@ -31,7 +31,9 @@ const FAQ: { q: string; a: string }[] = [
   { q: "Where does a shared file show up?", a: "In your teammate's Coffer, under Shared with you, straight from QoreChain. They open it with one click, with nothing to download or paste. In a terminal, coffer inbox lists it and coffer pull saves it." },
   { q: "How do I move from dotenvx?", a: "Run coffer import next to your .env and .env.keys, or use the app. Values are decrypted on your machine and sealed again. Rotate them when you can, since old copies stay in git history." },
   { q: "What if I lose my key?", a: "Load your key file to get it back. No key file? Make a new key, and the owner seals you in again with one click." },
-  { q: "What does QoreChain refuse?", a: "A forged card. A card older than the one it already has. A change to a file signed by anyone but its owner. And any older copy of a file, once a newer change is recorded." },
+  { q: "What if a laptop is stolen?", a: "Remove that address from the file. Every copy stops opening for it, the one on the laptop included, because each open is a request that QoreChain answers, and QoreChain refuses anyone not on the list." },
+  { q: "Can Coffer read my files?", a: "No. Coffer's keeper holds only half of what opens a file, and the contract hands that half only to someone on the file's list, sealed to their own key. Every open is recorded on QoreChain." },
+  { q: "What does QoreChain refuse?", a: "A forged card. A card older than the one it already has. A change to a file signed by anyone but its owner. An older copy of a file, once a newer change is recorded. And any request to open a file from an address that is not on its list." },
 ];
 
 function Rows({ items, first = false }: { items: { q: string; a: string }[]; first?: boolean }) {

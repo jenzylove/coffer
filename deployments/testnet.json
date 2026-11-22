@@ -3,6 +3,8 @@
   "coffer": "0xeafe164a3f52ee096c27ba9e5ac05c0d621aa3fe",
   "cofferDeployTx": "0xf2259a010acd90b6cde731a655a8c406896fe831e2a33793f8adb2ab2f679e1d",
   "cofferDeployBlock": 10561613,
-  "poster": "qor1t2e5q32v5lj2spa0htvaep6f2td5cuxp4qv9lc",
-  "posterEvm": "0x5ab340454CA7E4A807afbAd9Dc874952Db4c70C1"
+  "poster": "qor1a9qjefnsudjc3ntur9epf0exn4wckq9cmz6229",
+  "posterEvm": "0xE9412Ca670e36588cD7C197214Bf269D5D8B00b8",
+  "keeper": "qor1kgdvm6gngc5a2esk5kuask7zjswcyp8rjrpp0u",
+  "note": "The contract was deployed by a test posting account; the live server submits from the poster above. Anyone may submit: the contract checks signatures, not the sender."
 }

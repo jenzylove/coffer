@@ -5,37 +5,77 @@
 // A wallet account (QoreX) signs through the page: its Signer posts the text
 // to sign to crypto.ts, which asks QoreX and posts the signature back.
 import type { SealKeyPair } from "@qorechain/qoreseal";
-import { sealKeysFromSeed, parseEnvelope, recipientHint, toBase64Url } from "@qorechain/qoreseal";
+import { sealKeysFromSeed, parseEnvelope, recipientHint, toBase64Url, fromBase64Url } from "@qorechain/qoreseal";
+import { pqKeyFromSeed } from "@qorechain/qoresign";
 import type { MessageSignature } from "@qorechain/qoresign";
 import { sha3_256 } from "@noble/hashes/sha3.js";
 import { decodeEventLog, encodeEventTopics, toHex, type Hex } from "viem";
 import {
   createCoffer, shareCoffer, revokeCoffer, openCoffer, verifyCoffer, checkHead, formatCoffer, parseCoffer, localSigner,
-  CofferError, hex, type Reader, type Signer,
+  ownerRelease, canRead, signOpen, newNonce, openReleaseTo, keeperOpenRelease, deviceText, deviceId,
+  CofferError, hex, type CofferFile, type Reader, type Signer,
 } from "../../../src/core/vault.ts";
 import { signCard } from "../../../src/core/card.ts";
 import { identityFromMnemonic, newMnemonic, type Identity } from "../../../src/core/identity.ts";
 import { parseDotenv, serializeDotenv } from "../../../src/core/dotenv.ts";
 import { accountStatus, fetchPqKeys, registerIdentity, type Network } from "../../../src/chain/qore.ts";
-import { COFFER_ABI, evmAddress, fetchReader, filesOf, qorAddress, readCard, readFile, readHead, rpc, type DeliveredFile, type EvmNetwork } from "../../../src/chain/coffer.ts";
+import {
+  COFFER_ABI, blockNumber, deviceUntil, evmAddress, fetchReader, filesOf, qorAddress, readCard, readFile, readHead, readOpens, rpc,
+  type DeliveredFile, type EvmNetwork,
+} from "../../../src/chain/coffer.ts";
 
 const CHAIN = "qorechain-diana";
 // QoreChain goes through our own server (/rest, /evm); relative URLs resolve to this origin in the worker too
 const NET: Network = { chainId: CHAIN, rest: "/rest" };
 
-let evmNet: Promise<EvmNetwork> | null = null;
-/** The Coffer contract's address comes from the server (GET /api/config). */
-function evm(): Promise<EvmNetwork> {
-  if (!evmNet) {
-    evmNet = (async () => {
+let config: Promise<{ net: EvmNetwork; keeper: string | null }> | null = null;
+/** The Coffer contract and the keeper come from the server (GET /api/config). */
+function serverConfig() {
+  if (!config) {
+    config = (async () => {
       const r = await fetch("/api/config").catch(() => null);
-      const b = r?.ok ? ((await r.json().catch(() => null)) as { contract?: string | null } | null) : null;
+      const b = r?.ok ? ((await r.json().catch(() => null)) as { contract?: string | null; keeper?: string | null } | null) : null;
       if (!b?.contract) throw new CofferError("NO_CONTRACT", "recording on QoreChain is not set up on this server yet");
-      return { chainId: CHAIN, rest: "/rest", evm: "/evm", coffer: b.contract as Hex };
+      return { net: { chainId: CHAIN, rest: "/rest", evm: "/evm", coffer: b.contract as Hex }, keeper: b.keeper ?? null };
     })();
-    evmNet.catch(() => { evmNet = null; }); // ask again next time
+    config.catch(() => { config = null; }); // ask again next time
   }
-  return evmNet;
+  return config;
+}
+const evm = async () => (await serverConfig()).net;
+
+let keeperCache: Promise<Reader> | null = null;
+/** The file keeper's reader keys, from its card on chain: release pieces are sealed to it. */
+function keeperReader(): Promise<Reader> {
+  if (!keeperCache) {
+    keeperCache = (async () => {
+      const c = await serverConfig();
+      if (!c.keeper) throw new CofferError("NO_KEEPER", "this server has no keeper, so files cannot be opened through QoreChain here");
+      return fetchReader(c.net, c.keeper);
+    })();
+    keeperCache.catch(() => { keeperCache = null; });
+  }
+  return keeperCache;
+}
+
+/** Send a signed open request; the contract refuses (403) anyone not on the file's current list. */
+async function askToOpen(f: CofferFile, reader: string, keys: SealKeyPair, by: { device: Uint8Array } | { account: Signer }) {
+  const req = { file: f.id, epoch: f.epoch, reader, nonce: newNonce() };
+  const device = "device" in by ? pqKeyFromSeed(by.device) : null;
+  const sig = await signOpen(CHAIN, req, device ? { device } : { account: (by as { account: Signer }).account });
+  const r = await fetch("/api/open", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      file: f.id, epoch: f.epoch.toString(), reader, nonce: req.nonce.toString(), sig: toBase64Url(sig), release: toBase64Url(f.release),
+      ...(device ? { deviceKey: toBase64Url(device.publicKey) } : {}),
+    }),
+  }).catch(() => null);
+  const b = r ? ((await r.json().catch(() => ({}))) as { hash?: string; block?: number; sealed?: string; error?: string }) : {};
+  if (!r) throw new CofferError("SERVER_DOWN", "the Coffer server is not reachable right now");
+  if (r.status === 403) throw new CofferError("REFUSED_BY_CHAIN", b.error ?? "QoreChain refused to release this file");
+  if (!r.ok || !b.sealed) throw new CofferError("NOT_OPENED", b.error ?? `the server answered ${r.status}`);
+  const release = openReleaseTo({ chainId: CHAIN, file: f.id, epoch: f.epoch, reader, nonce: req.nonce, sealed: fromBase64Url(b.sealed), keys });
+  return { release, hash: b.hash ?? null, block: b.block ?? null };
 }
 
 const enc = new TextEncoder();
@@ -79,18 +119,21 @@ async function cardState(address: string, keys?: Pick<SealKeyPair, "mlkemPublicK
 // ---- landing story: three throwaway identities (you, Ada, Sam) -----------------
 type Who = "you" | "one" | "two";
 type DemoFile = Awaited<ReturnType<typeof createCoffer>>;
-let demo: { ids: Record<Who, Identity>; file?: DemoFile } | null = null;
+// a throwaway keeper too: in the story it stands in for the chain's release
+let demo: { ids: Record<Who, Identity>; keeper: Identity; file?: DemoFile } | null = null;
 function demoIds() {
-  if (!demo) { const make = () => identityFromMnemonic(newMnemonic()); demo = { ids: { you: make(), one: make(), two: make() } }; }
+  if (!demo) { const make = () => identityFromMnemonic(newMnemonic()); demo = { ids: { you: make(), one: make(), two: make() }, keeper: make() }; }
   return demo;
 }
 function canOpen(f: DemoFile) {
   const out: Partial<Record<Who, "open" | "refused">> = {};
-  for (const w of ["you", "one", "two"] as Who[]) {
-    try { openCoffer(f, demo!.ids[w].sealKeys); out[w] = "open"; }
-    catch (e) { if ((e as { code?: string }).code === "NOT_A_READER") out[w] = "refused"; else throw e; }
-  }
+  for (const w of ["you", "one", "two"] as Who[]) out[w] = canRead(f, demo!.ids[w].sealKeys) ? "open" : "refused";
   return out;
+}
+/** What a reader on the list reads in the story: the keeper releases this epoch's piece to them. */
+function demoOpen(f: DemoFile, who: Identity) {
+  const release = keeperOpenRelease({ chainId: CHAIN, file: f.id, epoch: f.epoch, envelope: f.release, keeperKeys: demo!.keeper.sealKeys });
+  return openCoffer(f, who.sealKeys, release);
 }
 const namesOf = (p: Uint8Array) => parseDotenv(dec.decode(p)).map((e) => e.key);
 const readerOf = (i: Identity): Reader => ({ address: i.address, mlkemPublicKey: i.sealKeys.mlkemPublicKey, x25519PublicKey: i.sealKeys.x25519PublicKey });
@@ -216,19 +259,19 @@ const ops: Record<string, (a: any, ctx: Ctx) => unknown> = {
     const d = demoIds();
     const entries = parseDotenv(env);
     if (!entries.length) throw new Error("Write at least one line like NAME=value first.");
-    d.file = await createCoffer({ chainId: CHAIN, name: ".env", owner: localSigner(d.ids.you), ownerKeys: d.ids.you.sealKeys, plaintext: enc.encode(serializeDotenv(entries)) });
+    d.file = await createCoffer({ chainId: CHAIN, name: ".env", owner: localSigner(d.ids.you), ownerKeys: d.ids.you.sealKeys, keeper: readerOf(d.keeper), plaintext: enc.encode(serializeDotenv(entries)) });
     return { can: canOpen(d.file), count: entries.length, text: formatCoffer(d.file) };
   },
   async demoShare() {
     const ids = demo!.ids;
-    demo!.file = await shareCoffer(demo!.file!, localSigner(ids.you), ids.you.sealKeys, [readerOf(ids.one), readerOf(ids.two)]);
+    demo!.file = await shareCoffer(demo!.file!, localSigner(ids.you), ids.you.sealKeys, readerOf(demo!.keeper), [readerOf(ids.one), readerOf(ids.two)]);
     // what Ada reads once she is a reader: the real decrypted lines
-    const ada = dec.decode(openCoffer(demo!.file, ids.one.sealKeys)).split("\n").filter(Boolean);
+    const ada = dec.decode(demoOpen(demo!.file, ids.one)).split("\n").filter(Boolean);
     return { can: canOpen(demo!.file), text: formatCoffer(demo!.file), ada };
   },
   async demoRevoke() {
     const ids = demo!.ids;
-    const { file, rotate } = await revokeCoffer(demo!.file!, localSigner(ids.you), ids.you.sealKeys, [ids.two.address], namesOf);
+    const { file, rotate } = await revokeCoffer(demo!.file!, localSigner(ids.you), ids.you.sealKeys, readerOf(demo!.keeper), [ids.two.address], namesOf);
     demo!.file = file;
     return { can: canOpen(file), rotate, text: formatCoffer(file) };
   },
@@ -236,7 +279,7 @@ const ops: Record<string, (a: any, ctx: Ctx) => unknown> = {
     const ids = demo!.ids, f = demo!.file!;
     const pq = Object.fromEntries((["you", "one", "two"] as Who[]).map((w) => [ids[w].address, ids[w].pqKey.publicKey]));
     verifyCoffer(f, pq);
-    const names = namesOf(openCoffer(f, ids.one.sealKeys));
+    const names = namesOf(demoOpen(f, ids.one));
     let tamperRefused = false;
     try { verifyCoffer({ ...f, readers: [...f.readers, ids.two.address] }, pq); } catch { tamperRefused = true; }
     return { names, tamperRefused };
@@ -248,22 +291,85 @@ const ops: Record<string, (a: any, ctx: Ctx) => unknown> = {
   sealKeys: ({ seed }: { seed: Uint8Array }) => sealKeysFromSeed(seed),
   async create({ name, owner, keys, env }: OwnerArgs & { name: string; env: string }, ctx) {
     const plaintext = enc.encode(serializeDotenv(parseDotenv(env)));
-    return formatCoffer(await createCoffer({ chainId: CHAIN, name, owner: signerFor(owner, ctx.opId), ownerKeys: keys, plaintext }));
+    const keeper = await keeperReader();
+    return formatCoffer(await createCoffer({ chainId: CHAIN, name, owner: signerFor(owner, ctx.opId), ownerKeys: keys, keeper, plaintext }));
   },
   /** Seal the file to more addresses: each one's reader keys come from its verified card on chain. */
   async shareTo({ text, owner, keys, addresses }: OwnerArgs & { text: string; addresses: string[] }, ctx) {
     const net = await evm();
     const readers = await Promise.all(addresses.map((a) => fetchReader(net, a)));
-    return formatCoffer(await shareCoffer(parseCoffer(text), signerFor(owner, ctx.opId), keys, readers));
+    return formatCoffer(await shareCoffer(parseCoffer(text), signerFor(owner, ctx.opId), keys, await keeperReader(), readers));
   },
   async revoke({ text, owner, keys, addresses }: OwnerArgs & { text: string; addresses: string[] }, ctx) {
-    const { file, rotate } = await revokeCoffer(parseCoffer(text), signerFor(owner, ctx.opId), keys, addresses, namesOf);
+    const { file, rotate } = await revokeCoffer(parseCoffer(text), signerFor(owner, ctx.opId), keys, await keeperReader(), addresses, namesOf);
     return { text: formatCoffer(file), rotate };
   },
-  open({ text, keys }: { text: string; keys: SealKeyPair }) {
-    return parseDotenv(dec.decode(openCoffer(parseCoffer(text), keys)));
+  /** The owner opens with its own copy of the release piece: no request, nothing recorded. */
+  ownerOpen({ text, keys }: { text: string; keys: SealKeyPair }) {
+    const f = parseCoffer(text);
+    return parseDotenv(dec.decode(openCoffer(f, keys, ownerRelease(f, keys))));
+  },
+  /**
+   * A reader opens: checks (unless `checks` is false, for a copy kept from before), a signed request to
+   * QoreChain, the release piece sealed back to this key, then the values. Every such open is recorded.
+   * QoreX users sign with an approved device key (no popup); a browser key signs with the account itself.
+   */
+  async readerOpen({ text, reader, keys, by, checks = true }: { text: string; reader: string; keys: SealKeyPair; by: { kind: "device"; seed: Uint8Array } | { kind: "account"; owner: OwnerRef }; checks?: boolean }, ctx) {
+    const f = parseCoffer(text);
+    if (f.chainId !== CHAIN) throw new CofferError("WRONG_CHAIN", `this file is for ${f.chainId}`);
+    if (checks) {
+      verifyCoffer(f, await fetchPqKeys(NET, [f.owner, f.writer]));
+      checkHead(f, await readHead(await evm(), f.id));
+    }
+    if (!canRead(f, keys)) throw new CofferError("NOT_A_READER", "this identity is not a reader of this file");
+    if (f.owner === reader) return { entries: parseDotenv(dec.decode(openCoffer(f, keys, ownerRelease(f, keys)))), hash: null, block: null };
+    const o = await askToOpen(f, reader, keys, by.kind === "device" ? { device: by.seed } : { account: signerFor(by.owner, ctx.opId) });
+    return { entries: parseDotenv(dec.decode(openCoffer(f, keys, o.release))), hash: o.hash, block: o.block };
+  },
+  /** Is this browser's device key approved for the wallet right now? */
+  async deviceStatus({ address, seed }: { address: string; seed: Uint8Array }) {
+    const net = await evm();
+    const pk = pqKeyFromSeed(seed).publicKey;
+    const [until, now] = await Promise.all([deviceUntil(net, address, pk), blockNumber(net)]);
+    return { until, now, live: until > now + 120n };
+  },
+  /** Approve this browser's device key for about a day: one wallet signature, recorded by the contract. */
+  async approveDevice({ address, seed, owner }: { address: string; seed: Uint8Array; owner: OwnerRef }, ctx) {
+    const net = await evm();
+    const pk = pqKeyFromSeed(seed).publicKey;
+    const until = (await blockNumber(net)) + 60_000n;
+    const sig = await signerFor(owner, ctx.opId).sign(CHAIN, enc.encode(deviceText({ account: address, id: deviceId(pk), untilBlock: until })));
+    if (!sig.pq) throw new CofferError("BAD_SIGNATURE", "the wallet gave no ML-DSA-87 signature");
+    const r = await fetch("/api/device", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ account: address, deviceKey: toBase64Url(pk), until: until.toString(), sig: sig.pq.signature }),
+    }).catch(() => null);
+    const b = r ? ((await r.json().catch(() => ({}))) as { hash?: string; block?: number; error?: string }) : {};
+    if (!r?.ok) throw new CofferError("DEVICE_REFUSED", b.error ?? "the Coffer server is not reachable right now");
+    for (let i = 0; i < 20 && (await deviceUntil(net, address, pk)) < until; i++) await new Promise((ok) => setTimeout(ok, 1500));
+    return { hash: b.hash ?? null, block: b.block ?? null, until };
+  },
+  /** The access log: every open of a file, newest first, each with the transaction that recorded it. */
+  async opens({ fileId }: { fileId: string }) {
+    const net = await evm();
+    const rows = await readOpens(net, fileId);
+    const blocks = [...new Set(rows.map((r) => r.block))];
+    const hashes = new Map<string, string>();
+    await Promise.all(blocks.map(async (b) => {
+      const topics = encodeEventTopics({ abi: COFFER_ABI, eventName: "Opened", args: { file: `0x${fileId}` as Hex } });
+      const logs = await rpc<{ data: Hex; topics: Hex[]; transactionHash: Hex }[]>(net.evm, "eth_getLogs", [{ address: net.coffer, fromBlock: toHex(b), toBlock: toHex(b), topics }]).catch(() => []);
+      for (const l of logs) {
+        try {
+          const ev = decodeEventLog({ abi: COFFER_ABI, eventName: "Opened", data: l.data, topics: l.topics as [Hex, ...Hex[]] });
+          hashes.set(`${b}:${qorAddress(ev.args.reader)}:${ev.args.epoch}`, l.transactionHash);
+        } catch { /* not an Opened log */ }
+      }
+    }));
+    return rows.map((r) => ({ ...r, hash: hashes.get(`${r.block}:${r.reader}:${r.epoch}`) ?? null })).reverse();
   },
 };
+
+void evmAddress;
 
 type FromPage =
   | { id: number; op: string; args: unknown; signReply?: undefined }

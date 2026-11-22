@@ -15,6 +15,7 @@ import { parseDotenv, serializeDotenv, type DotenvEntry } from "../../../src/cor
 import { IMPORT_KEY, type ImportHint } from "../landing/ScanDoor.tsx";
 import { Addr, Chips, CopyAction, DropText, KeyFilePicker, Log, Problem, Progress, RecordFacts, Result, TxLink, type LogLine } from "./bits.tsx";
 import { OpenFile } from "./OpenFile.tsx";
+import { approveThisBrowser, keepCopy, keptCopy, openAsReader, type Opened } from "../lib/opener.ts";
 import { Toaster, toast } from "../components/Toast.tsx";
 
 // Files shared with an address that it has already looked at, so new arrivals can say "New".
@@ -375,7 +376,7 @@ function Setup({ invite }: { invite: Invite | null }) {
 
 // ---- the dashboard ---------------------------------------------------------------
 
-type View = { kind: "file"; id: string } | { kind: "shared"; id: string } | { kind: "seal" } | { kind: "open" };
+type View = { kind: "file"; id: string } | { kind: "shared"; id: string; go?: boolean } | { kind: "seal" } | { kind: "open" };
 
 function Dashboard({ invite, onInviteDone }: { invite: Invite | null; onInviteDone: () => void }) {
   const { address } = useIdentity();
@@ -457,7 +458,7 @@ function Dashboard({ invite, onInviteDone }: { invite: Invite | null; onInviteDo
     if (!chain || !invite || !awaiting || !address) return;
     const mineToOpen = (x: Delivered) => x.owner === invite.owner && x.readers.includes(address);
     const d = invite.file ? chain.find((x) => x.id === invite.file && mineToOpen(x)) : chain.find(mineToOpen);
-    if (d) { onInviteDone(); pick({ kind: "shared", id: d.id }, false); }
+    if (d) { onInviteDone(); pick({ kind: "shared", id: d.id, go: true }, false); }
   }, [chain]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // invited teammates who have signed their card since: ready to add (any page)
@@ -509,7 +510,7 @@ function Dashboard({ invite, onInviteDone }: { invite: Invite | null; onInviteDo
           {view.kind === "open" && <OpenFile />}
           {view.kind === "file" && current && <FileDetail stored={current} ready={ready} onChange={(patch) => { update(idOf(current), patch); void load(); }} />}
           {view.kind === "file" && !current && <p className="muted">That file isn't in this browser any more.</p>}
-          {view.kind === "shared" && sharedNow && <SharedView d={sharedNow} />}
+          {view.kind === "shared" && sharedNow && <SharedView key={sharedNow.id} d={sharedNow} go={!!view.go} />}
           {view.kind === "shared" && !sharedNow && <p className="muted">{chain === null ? "Looking on QoreChain…" : "That file isn't shared with you any more."}</p>}
         </>}
       </div>
@@ -566,7 +567,7 @@ function Sidebar({ mine, shared, chainRead, view, pick, readyAll }: {
               const twin = shared.some((o) => o !== d && o.name === d.name);
               const fresh = can && !seen.has(d.id);
               return (
-                <button key={d.id} role="tab" aria-selected={on({ kind: "shared", id: d.id })} className="file-row" onClick={() => pick({ kind: "shared", id: d.id })}>
+                <button key={d.id} role="tab" aria-selected={on({ kind: "shared", id: d.id })} className="file-row" onClick={() => pick({ kind: "shared", id: d.id, go: true })}>
                   <span className="mono file-name">{d.name}.coffer{twin ? <span className="dim"> #{d.id.slice(0, 4)}</span> : null}{fresh ? <span className="new-tag">New</span> : null}</span>
                   <span className="file-meta">from {short(d.owner, 6, 4)} · {can ? "You can open it" : "You were removed"}</span>
                 </button>
@@ -785,7 +786,7 @@ function OwnerValues({ text }: { text: string }) {
   const [entries, setEntries] = useState<DotenvEntry[] | null>(null);
   useEffect(() => {
     let live = true;
-    if (keys) work<DotenvEntry[]>("open", { text, keys }).then((e) => live && setEntries(e)).catch(() => live && setEntries([]));
+    if (keys) work<DotenvEntry[]>("ownerOpen", { text, keys }).then((e) => live && setEntries(e)).catch(() => live && setEntries([]));
     return () => { live = false; };
   }, [text, keys]);
   if (!entries) return <p className="sheet-wait">Opening with your key…</p>;
@@ -809,48 +810,89 @@ function HeadNow({ fileId, epoch }: { fileId: string; epoch: bigint }) {
   );
 }
 
-// ---- a file shared with you: straight from QoreChain ------------------------------------
+// ---- a file shared with you: every open is a request QoreChain answers ----------------
 
-type SharedState = { s: "checking" } | { s: "ok"; entries: DotenvEntry[] } | { s: "refused"; code?: string; msg: string } | { s: "nokey" } | { s: "removed" };
+/** Opens already answered in this visit, so coming back to a file does not ask again. */
+const answered = new Map<string, Opened>();
 
-function SharedView({ d }: { d: Delivered }) {
-  const { address, keys } = useIdentity();
+type SharedState =
+  | { s: "idle" } | { s: "device" } | { s: "approving" } | { s: "opening" } | { s: "ok"; o: Opened }
+  | { s: "refused"; code?: string; msg: string } | { s: "nokey" } | { s: "removed" };
+
+function SharedView({ d, go }: { d: Delivered; go: boolean }) {
+  const ident = useIdentity();
+  const { address, keys, kind, owner } = ident;
   const can = !!address && d.readers.includes(address);
   useEffect(() => { if (address) markSeen(address, d.id); }, [address, d.id]);
-  const [st, setSt] = useState<SharedState>({ s: "checking" });
-  useEffect(() => {
-    let live = true;
-    if (!can) { setSt({ s: "removed" }); return; }
-    if (!keys) { setSt({ s: "nokey" }); return; }
-    setSt({ s: "checking" });
-    (async () => {
-      try {
-        await work("check", { text: d.text });
-        const entries = await work<DotenvEntry[]>("open", { text: d.text, keys });
-        if (live) setSt({ s: "ok", entries });
-      } catch (e) {
-        if (live) setSt({ s: "refused", code: errCode(e), msg: errText(e) });
-      }
-    })();
-    return () => { live = false; };
-  }, [d.id, d.epoch, d.text, can, keys]);
+  const done = answered.get(`${d.id}:${d.epoch}`);
+  const [st, setSt] = useState<SharedState>(() => (done ? { s: "ok", o: done } : !can ? { s: "removed" } : !keys ? { s: "nokey" } : { s: "idle" }));
+  const [err, setErr] = useState<unknown>(null);
+  const old = address ? keptCopy(address, d.id) : null;
 
-  const stamp = st.s === "ok" ? <Stamp>Opened</Stamp> : st.s === "removed" ? <Stamp tone="red">Removed</Stamp> : st.s === "refused" ? <Stamp tone="red">Refused</Stamp> : null;
-  const line = st.s === "ok" ? "Checked against QoreChain and opened with your key."
-    : st.s === "checking" ? "Checking it against QoreChain…"
-      : st.s === "removed" ? "You were removed. Its owner sealed a new version without you."
-        : st.s === "nokey" ? "This browser doesn't have your key. Load your key file from Details."
-          : explain(st.code, st.msg);
+  /** Ask QoreChain for this copy (the latest, or the one kept from before when `copy` is given). */
+  const pending = useRef<string | undefined>(undefined); // the copy to open once this browser is approved
+  const open = useCallback(async (copy?: string) => {
+    if (!address || !keys) return;
+    setErr(null);
+    setSt({ s: "opening" });
+    try {
+      const o = await openAsReader({ address, keys, kind, owner }, copy ?? d.text, !copy);
+      if (!copy) { answered.set(`${d.id}:${d.epoch}`, o); keepCopy(address, d.id, d.text); }
+      setSt({ s: "ok", o });
+    } catch (e) {
+      const code = errCode(e);
+      if (code === "NEEDS_DEVICE") { pending.current = copy; setSt({ s: "device" }); }
+      else if (copy || code === "REFUSED_BY_CHAIN") setSt({ s: "refused", code, msg: errText(e) });
+      else { setSt({ s: can ? "idle" : "removed" }); setErr(e); }
+    }
+  }, [address, keys, kind, owner, d.id, d.epoch, d.text, can]);
+
+  const approve = async () => {
+    if (!address || !owner) return;
+    setErr(null);
+    setSt({ s: "approving" });
+    try { await approveThisBrowser({ address, owner }); await open(pending.current); }
+    catch (e) { setSt({ s: "device" }); setErr(e); }
+  };
+
+  // opened on its own when the person asked for this file
+  const started = useRef(false);
+  useEffect(() => {
+    if (started.current || !go || st.s !== "idle") return;
+    started.current = true;
+    void open();
+  }, [go, st.s, open]);
+
+  const refusedByChain = st.s === "refused" && st.code === "REFUSED_BY_CHAIN";
+  const stamp = st.s === "ok" ? <Stamp>Opened</Stamp> : st.s === "removed" || st.s === "refused" ? <Stamp tone="red">{st.s === "removed" ? "Removed" : "Refused"}</Stamp> : null;
+  const body = st.s === "ok" ? <DocValues entries={st.o.entries} />
+    : st.s === "opening" ? <p className="sheet-wait">Asking QoreChain to release it to you…</p>
+      : st.s === "approving" ? <p className="sheet-wait">Waiting for you in QoreX…</p>
+        : st.s === "removed" ? <p className="sheet-wait">You were removed. Its owner sealed a new version without you.</p>
+          : st.s === "refused" ? <p className="sheet-wait">{refusedByChain ? "QoreChain refused: you're not on this file's list any more." : explain(st.code, st.msg)}</p>
+            : st.s === "nokey" ? <p className="sheet-wait">This browser doesn't have your key. Load your key file from Details.</p>
+              : <p className="sheet-wait">Sealed. Each open is a request QoreChain answers and records.</p>;
   return (
     <div className="file" aria-labelledby="h-shared">
       <Sheet className="sheet-file" left={<span id="h-shared">{d.name}.coffer</span>} right={`from ${short(d.owner, 6, 4)}`} stamp={stamp}>
-        {st.s === "ok" ? <DocValues entries={st.entries} /> : <p className="sheet-wait">{line}</p>}
+        {body}
       </Sheet>
+      {st.s === "device" && (
+        <div className="ready-line" role="status">
+          <p>Approve this browser for a day (one signature in QoreX). Then files open here without asking.</p>
+          <button className="btn" onClick={() => void approve()}>Approve this browser</button>
+        </div>
+      )}
+      {st.s === "idle" && <div className="actions actions-tight"><button className="btn" onClick={() => void open()}>Open it</button></div>}
+      {st.s === "removed" && old && <div className="actions actions-tight"><button className="btn-outline" onClick={() => void open(old)}>Try the copy you kept</button></div>}
       <p className="file-line">
-        <span>{st.s === "removed" ? `From ${short(d.owner, 6, 4)}.` : `Shared with you by ${short(d.owner, 6, 4)}.`}</span>
-        {d.hash && <><span className="dot" aria-hidden>·</span><a className="link-sm" href={explorerTx(d.hash)} target="_blank" rel="noreferrer">Recorded on QoreChain</a></>}
+        {st.s === "ok" && st.o.hash ? <>
+          <span>Opened</span><span className="dot" aria-hidden>·</span>
+          <a className="link-sm" href={explorerTx(st.o.hash)} target="_blank" rel="noreferrer">recorded on QoreChain</a>
+        </> : <span>{st.s === "removed" || st.s === "refused" ? `From ${short(d.owner, 6, 4)}.` : `Shared with you by ${short(d.owner, 6, 4)}.`}</span>}
         <span className="dot" aria-hidden>·</span><button className="link-sm" onClick={() => download(`${d.name}.coffer`, d.text)}>Download</button>
       </p>
+      {err !== null && <Problem error={err} plain />}
       <details className="raw">
         <summary>Details</summary>
         <dl className="facts">
@@ -859,7 +901,8 @@ function SharedView({ d }: { d: Delivered }) {
           <div><dt>On QoreChain</dt><dd className="mono">epoch {String(d.epoch)} · version {String(d.version)} · block {d.height}</dd></div>
           <div><dt>In a terminal</dt><dd className="mono">coffer pull {d.id}</dd></div>
         </dl>
-        {d.hash && <RecordFacts hash={d.hash} block={d.height} />}
+        {st.s === "ok" && st.o.hash && <RecordFacts hash={st.o.hash} block={st.o.block ?? undefined} />}
+        {d.hash && <p className="muted small">The latest copy was delivered in <TxLink hash={d.hash} />.</p>}
         {st.s === "refused" && <p className="mono small">{st.code ? `${st.code}: ` : ""}{st.msg}</p>}
       </details>
     </div>
@@ -868,10 +911,11 @@ function SharedView({ d }: { d: Delivered }) {
 
 // ---- one of your files, as the document ---------------------------------------------------
 
-type TeammateAnswer = { opened: true; keys: string[]; epoch: number | string; version: number | string; verified: boolean } | { opened: false; code?: string; error: string };
-type Outcome = { kind: "ask"; answer: TeammateAnswer; label: "first" | "again" | "old" } | { kind: "revoke"; rotate: string[]; tx: string; block?: number };
+type TeammateAnswer = { opened: true; keys: string[]; epoch: number | string; version: number | string; verified: boolean; hash?: string; block?: number } | { opened: false; code?: string; error: string };
+type Outcome = { kind: "ask"; answer: TeammateAnswer; label: "first" | "thief" } | { kind: "revoke"; rotate: string[]; tx: string; block?: number };
 
 const REFUSED: Record<string, string> = {
+  REFUSED_BY_CHAIN: "QoreChain would not release it: Ada is not on the list any more.",
   NOT_A_READER: "Ada isn't on the list any more, so her key opens nothing.",
   STALE: "This is an old copy. QoreChain has a newer one, so Ada won't use it.",
   BAD_SIGNATURE: "Someone changed this file by hand.",
@@ -890,8 +934,8 @@ function getTeammate(): Promise<string> {
   return teammateCache;
 }
 
-const ASKS = new Set(["first", "again", "old"]);
-const ADA = new Set(["ada", "remove-ada", "first", "again", "old"]);
+const ASKS = new Set(["first", "thief"]);
+const ADA = new Set(["ada", "remove-ada", "first", "thief"]);
 
 function FileDetail({ stored, ready, onChange }: { stored: Stored; ready: Record<string, boolean>; onChange: (patch: Partial<Stored>) => void }) {
   const { address, owner, keys } = useIdentity();
@@ -905,6 +949,7 @@ function FileDetail({ stored, ready, onChange }: { stored: Stored; ready: Record
   const [outcomes, setOutcomes] = useState<Outcome[]>([]);
   const [changed, setChanged] = useState<string[]>([]);
   const [adaOpen, setAdaOpen] = useState(false);
+  const [opensTick, setOpensTick] = useState(0);
   const log = useLog();
   const wallet = owner?.kind === "wallet";
 
@@ -981,10 +1026,12 @@ function FileDetail({ stored, ready, onChange }: { stored: Stored; ready: Record
     }
   };
 
-  const ask = async (text: string, label: "first" | "again" | "old") => {
+  const ask = async (text: string, label: "first" | "thief") => {
     setBusy(label); setErr(null);
     try {
-      const answer = await api<TeammateAnswer>("/api/teammate/open", { body: { file: text } });
+      // the stolen laptop runs no checks of its own: only QoreChain stands in the way
+      const answer = await api<TeammateAnswer>("/api/teammate/open", { body: label === "thief" ? { file: text, thief: true } : { file: text } });
+      setOpensTick((t) => t + 1);
       setOutcomes((o) => [...o, { kind: "ask", answer, label }]);
     } catch (e) {
       setErr(e);
@@ -1076,8 +1123,7 @@ function FileDetail({ stored, ready, onChange }: { stored: Stored; ready: Record
           <button className="btn-outline" disabled={!!busy || mateIn} onClick={() => void withAda((a) => share(a, "ada"))}>{busy === "ada" ? "Sharing with Ada" : mateIn ? "Shared with Ada" : "Share with Ada"}</button>
           <button className="btn-outline" disabled={!!busy || !mateIn} onClick={() => void ask(stored.text, "first")}>{busy === "first" ? "Asking Ada" : "Ask Ada to open it"}</button>
           <button className="btn-outline" disabled={!!busy || !mateIn} onClick={() => void withAda((a) => remove(a, "remove-ada"))}>{busy === "remove-ada" ? "Removing Ada" : "Remove Ada"}</button>
-          <button className="btn-outline" disabled={!!busy || !mateRemoved} onClick={() => void ask(stored.text, "again")}>{busy === "again" ? "Asking Ada" : "Ask Ada again"}</button>
-          <button className="btn-outline" disabled={!!busy || !mateRemoved || !stored.old} onClick={() => stored.old && void ask(stored.old, "old")}>{busy === "old" ? "Sending" : "Send Ada the old copy"}</button>
+          <button className="btn-outline" disabled={!!busy || !mateRemoved || !stored.old} onClick={() => stored.old && void ask(stored.old, "thief")}>{busy === "thief" ? "Trying her old copy" : "Ada's laptop is stolen: try her old copy"}</button>
         </div>
         {adaBusy && progress}
         {adaBusy && problem}
@@ -1085,6 +1131,8 @@ function FileDetail({ stored, ready, onChange }: { stored: Stored; ready: Record
           {outcomes.map((o, i) => <OutcomeView key={i} o={o} />)}
         </div>
       </details>
+
+      <WhoOpened fileId={file.id} epoch={file.epoch} tick={opensTick} name={(a) => (a === address ? "You" : isAda(a) ? "Ada" : short(a, 6, 4))} />
 
       <details className="raw file-raw">
         <summary>Details</summary>
@@ -1114,6 +1162,39 @@ function FileDetail({ stored, ready, onChange }: { stored: Stored; ready: Record
   );
 }
 
+type OpenRow = { reader: string; epoch: bigint; block: number; hash: string | null };
+
+/** The access log: every open of this file QoreChain recorded, newest first. Read when it is unfolded. */
+function WhoOpened({ fileId, epoch, tick, name }: { fileId: string; epoch: bigint; tick: number; name: (a: string) => string }) {
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState<OpenRow[] | null>(null);
+  const [err, setErr] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    setErr(false);
+    work<OpenRow[]>("opens", { fileId }).then((r) => live && setRows(r)).catch(() => live && setErr(true));
+    return () => { live = false; };
+  }, [open, fileId, epoch, tick]);
+  return (
+    <details className="raw who-opened" onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}>
+      <summary>Who opened it</summary>
+      {err ? <p className="muted small">QoreChain can't be reached right now.</p> : !rows ? <p className="muted small">Reading QoreChain…</p> : rows.length === 0 ? <p className="muted small">Nobody has opened it yet. You open your own files with your own key, so they are not listed.</p> : (
+        <ol className="records">
+          {rows.map((r, i) => (
+            <li key={`${r.block}:${r.reader}:${i}`}>
+              <span>{name(r.reader)}</span>
+              <span className="mono">epoch {String(r.epoch)}</span>
+              <span className="mono">block {r.block}</span>
+              {r.hash ? <TxLink hash={r.hash} label="view" /> : <span />}
+            </li>
+          ))}
+        </ol>
+      )}
+    </details>
+  );
+}
+
 function OutcomeView({ o }: { o: Outcome }) {
   if (o.kind === "revoke") {
     return (
@@ -1126,12 +1207,12 @@ function OutcomeView({ o }: { o: Outcome }) {
     );
   }
   const a = o.answer;
-  const what = o.label === "old" ? "The old copy, sent to Ada" : o.label === "again" ? "Asked Ada again" : "Asked Ada";
+  const what = o.label === "thief" ? "Ada's stolen laptop, her old copy" : "Asked Ada";
   return a.opened ? (
     <div className="outcome answer">
       <p className="label">{what}</p>
       <Stamp>Opened</Stamp>
-      <p>Ada opened it and read {a.keys.length} {a.keys.length === 1 ? "name" : "names"}. The server reports names only, never values.</p>
+      <p>Ada opened it and read {a.keys.length} {a.keys.length === 1 ? "name" : "names"}. The server reports names only, never values.{a.hash ? <> Her open is <a className="link-sm" href={explorerTx(a.hash)} target="_blank" rel="noreferrer">recorded on QoreChain</a>.</> : null}</p>
       <Chips names={a.keys} />
       <details className="steps"><summary>Details</summary><p className="mono">epoch {String(a.epoch)} · version {String(a.version)} · checked against QoreChain</p></details>
     </div>

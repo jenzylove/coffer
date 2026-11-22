@@ -298,6 +298,9 @@ details.ada > summary { list-style: none; cursor: pointer; display: inline; font
 details.ada > summary:hover { opacity: 0.7; }
 details.ada > *:not(summary) { margin-top: 16px; }
 .file-raw { margin-top: 32px; }
+.who-opened { margin-top: 32px; }
+.who-opened + .file-raw { margin-top: 8px; }
+.actions.actions-tight { margin-top: 18px; }
 .doc-copy { margin-left: 14px; }
 .files { display: grid; }
 .file-row { display: grid; gap: 2px; text-align: left; padding: 14px 0; border-bottom: 1px solid var(--rule); color: var(--body); }
