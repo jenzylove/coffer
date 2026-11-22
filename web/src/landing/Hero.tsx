@@ -9,7 +9,7 @@ import { Link } from "../lib/router.tsx";
 import { Bar, EnvLine, Sheet, Stamp, splitLine, trunc } from "../components/Doc.tsx";
 
 const PLAIN = [
-  "DATABASE_URL=postgres://app:9fQ2v@db/main",
+  "DATABASE_URL=postgres://app:9fQ2v@db",
   "OPENAI_API_KEY=sk-proj-4Zt8w1Lq0aB",
   "STRIPE_KEY=sk_live_51Hx7K2mN",
 ];
