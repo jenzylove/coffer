@@ -96,6 +96,13 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 const post = (m: unknown) => (self as unknown as Worker).postMessage(m);
 
+/** The owner's release piece for this version: its own copy, or, if a writer sealed that copy wrong, asked from the keeper like any reader. */
+async function ownerPiece(f: CofferFile, owner: OwnerRef, keys: SealKeyPair, opId: number) {
+  try { return ownerRelease(f, keys); } catch { /* fall through */ }
+  const address = owner.kind === "local" ? owner.id.address : owner.address;
+  return (await askToOpen(f, address, { account: signerFor(owner, opId) })).release;
+}
+
 // ---- signing: a local key here, or the wallet through the page --------------------
 
 export type OwnerRef = { kind: "local"; id: Identity } | { kind: "wallet"; address: string };
@@ -312,10 +319,12 @@ const ops: Record<string, (a: any, ctx: Ctx) => unknown> = {
   async shareTo({ text, owner, keys, addresses }: OwnerArgs & { text: string; addresses: string[] }, ctx) {
     const net = await evm();
     const readers = await Promise.all(addresses.map((a) => fetchReader(net, a)));
-    return formatCoffer(await shareCoffer(parseCoffer(text), signerFor(owner, ctx.opId), keys, await keeperReader(), readers));
+    const f = parseCoffer(text);
+    return formatCoffer(await shareCoffer(f, signerFor(owner, ctx.opId), keys, await keeperReader(), readers, await ownerPiece(f, owner, keys, ctx.opId)));
   },
   async revoke({ text, owner, keys, addresses }: OwnerArgs & { text: string; addresses: string[] }, ctx) {
-    const { file, rotate } = await revokeCoffer(parseCoffer(text), signerFor(owner, ctx.opId), keys, await keeperReader(), addresses, namesOf);
+    const f = parseCoffer(text);
+    const { file, rotate } = await revokeCoffer(f, signerFor(owner, ctx.opId), keys, await keeperReader(), addresses, namesOf, await ownerPiece(f, owner, keys, ctx.opId));
     return { text: formatCoffer(file), rotate };
   },
   /** The owner opens with its own copy of the release piece: no request, nothing recorded. */

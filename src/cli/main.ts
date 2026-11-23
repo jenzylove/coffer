@@ -354,7 +354,7 @@ async function share(pos: string[], flags: Record<string, string | true>) {
   await checkFile(f, { path: path, acceptOwner: flags["accept-owner"] === true });
   const id = loadIdentity();
   const readers = await Promise.all(pos.map((a) => fetchReader(evmNet, a)));
-  const g = await shareCoffer(f, localSigner(id), id.sealKeys, await keeperReader(), readers);
+  const g = await shareCoffer(f, localSigner(id), id.sealKeys, await keeperReader(), readers, await releaseFor(f, id));
   say(`${c.green("shared")} ${path} with ${readers.length} reader(s); epoch ${g.epoch}`);
   await recordHead(g);
   writeSealed(path, g);
@@ -367,7 +367,7 @@ async function revoke(pos: string[], flags: Record<string, string | true>) {
   const f = readSealed(path);
   await checkFile(f, { path: path, acceptOwner: flags["accept-owner"] === true });
   const id = loadIdentity();
-  const { file, rotate } = await revokeCoffer(f, localSigner(id), id.sealKeys, await keeperReader(), pos, (p: Uint8Array) => parseDotenv(dec.decode(p)).map((e) => e.key));
+  const { file, rotate } = await revokeCoffer(f, localSigner(id), id.sealKeys, await keeperReader(), pos, (p: Uint8Array) => parseDotenv(dec.decode(p)).map((e) => e.key), await releaseFor(f, id));
   say(`${c.green("revoked")} ${pos.length} reader(s); epoch ${file.epoch}. They cannot open this or any later version.`);
   await recordHead(file);
   writeSealed(path, file);

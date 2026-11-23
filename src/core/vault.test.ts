@@ -307,3 +307,15 @@ test("a file shared with too many people is refused before the owner signs", asy
   const f = await createCoffer({ chainId: CHAIN, name: ".env", owner: counting, ownerKeys: A.sealKeys, keeper: KEEPER, readers: many.slice(0, 8).map(reader), plaintext: enc.encode(ENV) });
   assert.ok(enc.encode(formatCoffer(f)).length <= 65_536, `${enc.encode(formatCoffer(f)).length} bytes`);
 });
+
+test("a write whose owner copy is sealed to the wrong keys does not lock the owner out of share and revoke", async () => {
+  const f = await base();
+  // a teammate passes its own keys under the owner's address
+  const g = await updateCoffer(f, S(B), B.sealKeys, KEEPER, { address: A.address, mlkemPublicKey: B.sealKeys.mlkemPublicKey, x25519PublicKey: B.sealKeys.x25519PublicKey }, enc.encode("X=1\n"));
+  verifyCoffer(g, pq);
+  assert.throws(() => ownerRelease(g, A.sealKeys), isCode("BAD_RELEASE"));
+  // the owner asks the keeper like any reader, and passes that piece on
+  const { file } = await revokeCoffer(g, S(A), A.sealKeys, KEEPER, [B.address], names, keeperPiece(g));
+  verifyCoffer(file, pq);
+  assert.equal(dec.decode(openCoffer(file, A.sealKeys, ownerRelease(file, A.sealKeys))), "X=1\n");
+});

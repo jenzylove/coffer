@@ -156,15 +156,15 @@ export default function Proof() {
             <p className="muted small">EVM transactions open on the dashboard explorer: switch it to Testnet there.</p>
           </details>
         </Row>
-        <Row n="04" title="Sizes and costs" tag="measured 22 Nov 2026">
+        <Row n="04" title="Sizes and costs" tag="measured 23 Nov 2026">
           <dl className="facts facts-big">
             <div><dt>A card, once per person</dt><dd className="mono">about 0.06 QOR</dd></div>
-            <div><dt>Each seal, share or remove</dt><dd className="mono">0.09 to 0.12 QOR</dd></div>
+            <div><dt>Each seal, share or remove</dt><dd className="mono">0.09 to 0.13 QOR</dd></div>
             <div><dt>Each open by a teammate</dt><dd className="mono">about 0.04 QOR</dd></div>
             <div><dt>Key envelope, per reader</dt><dd className="mono">about 1.6 KB</dd></div>
             <div><dt>Overhead on the data</dt><dd className="mono">about 100 bytes</dd></div>
           </dl>
-          <p className="muted">Measured on the transactions above, at 101 gwei on the testnet EVM: a card about 590,000 gas; a change or a write with one reader 883,589 to 1,221,551 gas, because the whole sealed file travels with it (about 27 KB with one reader, about 5.1 KB more per reader; up to 9 people per file); an open 434,778 to 451,854 gas, mostly the ML-DSA-87 check of the request. The Coffer server pays all of it, so a QoreX user pays nothing.</p>
+          <p className="muted">Measured on the transactions above, at 101 gwei on the testnet EVM: a card about 590,000 gas; a change or a write with one teammate 883,589 to 1,290,239 gas, because the whole sealed file travels with it (about 27 KB with one reader, about 5.1 KB more per reader; up to 9 people per file); an open 434,778 to 451,854 gas, mostly the ML-DSA-87 check of the request. The Coffer server pays all of it, so a QoreX user pays no Coffer fees (a brand new QoreX wallet sends one transfer first, which is how QoreX registers its key). The keeper that releases the second piece is one Coffer server: it never reads a file, and it is trusted not to hand a piece out off chain.</p>
         </Row>
         <Row n="05" title="The Coffer server, right now" tag="live">
           <Live />

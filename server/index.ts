@@ -24,7 +24,7 @@ import { Poster, PosterError, POSTER_NET } from "./poster.ts";
 const PORT = Number(process.env.PORT ?? 8787);
 const net = TESTNET;
 const DIST = join(import.meta.dirname, "..", "web", "dist");
-const DRIP_UQOR = 250_000n; // setup (about 54,000) plus about ten shares or revokes (about 17,000 each)
+const DRIP_UQOR = 250_000n; // setup (about 54,000) with room to spare; the poster pays every contract call
 const RELAYER_FLOOR = 200_000n;
 const PER_IP_DAY = 5;
 const GLOBAL_DAY = 300;
@@ -342,6 +342,9 @@ async function postWrite(req: IncomingMessage, res: ServerResponse) {
     if (f.chainId !== net.chainId) throw new CofferError("WRONG_CHAIN", `this file is for ${f.chainId}`);
     if (!f.write) throw new CofferError("NOTHING_TO_DO", "this file has no write to record");
     verifyCoffer(f, await fetchPqKeys(net, [f.owner, f.writer]));
+    // A version nobody could open would lock the whole team out: its release piece must be sealed to this keeper.
+    if (!keeper || f.keeper !== keeper.address) throw new CofferError("WRONG_KEEPER", `this file's keeper is ${f.keeper}, not this server's`);
+    keeperOpenRelease({ chainId: net.chainId, file: f.id, epoch: f.epoch, version: f.version, envelope: f.release, keeperKeys: keeper.sealKeys });
   } catch (e) {
     if (e instanceof CofferError) throw new HttpError(400, e.message);
     throw e;
