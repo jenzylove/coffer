@@ -140,6 +140,6 @@ export class Poster {
   }
 }
 
-type CofferCall = "setCard" | "setHead" | "open" | "setDevice";
+type CofferCall = "setCard" | "setHead" | "write" | "open" | "setDevice";
 const encode = (functionName: CofferCall, args: readonly unknown[]) =>
   encodeFunctionData({ abi: COFFER_ABI, functionName, args } as never);

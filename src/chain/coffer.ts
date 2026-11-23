@@ -10,7 +10,7 @@ import { addressFromBytes, parseAddress } from "@qorechain/qoresign";
 import { fetchPqKeyStatus } from "@qorechain/qoresign/network";
 import { isQoreSealError } from "@qorechain/qoreseal";
 import { readerFromCard, type RecipientCard } from "../core/card.ts";
-import { CofferError, type ChainHead, type CofferFile, type Reader, formatCoffer, headArgs } from "../core/vault.ts";
+import { CofferError, type ChainHead, type CofferFile, type OpenRequest, type Reader, formatCoffer, headArgs, writeArgs } from "../core/vault.ts";
 
 export const COFFER_ABI = parseAbi([
   "function chainId() view returns (string)",
@@ -22,14 +22,18 @@ export const COFFER_ABI = parseAbi([
   "function changeText(Change c) view returns (bytes)",
   "function filesOf(address account) view returns (bytes16[])",
   "function site() view returns (string)",
-  "struct OpenRequest { bytes16 file; uint64 epoch; address reader; uint64 nonce; }",
-  "struct OpenRecord { address reader; uint64 epoch; uint64 blockNumber; }",
+  "struct Write { bytes16 file; uint64 epoch; uint64 version; bytes32 access; bytes32 data; string name; address writer; }",
+  "function write(Write w, bytes sealedFile, bytes pqSig)",
+  "function writeText(Write w) view returns (bytes)",
+  "struct OpenRequest { bytes16 file; uint64 epoch; uint64 version; address reader; bytes32 replyKey; uint64 nonce; }",
+  "struct OpenRecord { address reader; uint64 epoch; uint64 version; uint64 blockNumber; }",
   "function open(OpenRequest r, bytes deviceKey, bytes sig, bytes release)",
   "function setDevice(address account, bytes deviceKey, uint64 untilBlock, bytes pqSig)",
   "function opensOf(bytes16 file) view returns (OpenRecord[])",
   "function memberAt(bytes16 file, address account) view returns (uint64)",
   "function devices(address account, bytes32 id) view returns (uint64)",
-  "event Opened(bytes16 indexed file, address indexed reader, uint64 epoch, uint64 nonce, bytes32 device, bytes release)",
+  "event Opened(bytes16 indexed file, address indexed reader, uint64 epoch, uint64 version, uint64 nonce, bytes32 device, bytes32 replyKey, bytes release)",
+  "event Written(bytes16 indexed file, address indexed writer, uint64 version)",
   "event DeviceSet(address indexed account, bytes32 indexed device, uint64 untilBlock)",
   "function cardText(address account, bytes32 mlkemSha3, bytes32 x25519, string issuedAt) view returns (bytes)",
   "event CardSet(address indexed account, bytes32 mlkemSha3, bytes32 x25519, string issuedAt, bytes mlkemKey, bytes card)",
@@ -52,6 +56,10 @@ export const COFFER_ABI = parseAbi([
   "error DeviceNotApproved()",
   "error BadDevice()",
   "error BadRelease()",
+  "error StaleVersion(uint64 current)",
+  "error NotLatest(uint64 epoch, uint64 version)",
+  "error BadAccess()",
+  "error BadReplyKey()",
 ]);
 
 export interface EvmNetwork {
@@ -167,6 +175,18 @@ export function headCall(f: CofferFile) {
   return { functionName: "setHead" as const, args: [change, sealed, b64ToHex(h.pqSig)] as const };
 }
 
+/** The arguments for write: a reader's signed write, and the sealed file it delivers. */
+export function writeCall(f: CofferFile) {
+  const w = writeArgs(f);
+  if (!w.pqSig) throw new CofferError("BAD_SIGNATURE", "the write has no ML-DSA-87 signature");
+  const args = {
+    file: `0x${w.file}` as Hex, epoch: w.epoch, version: w.version, access: `0x${w.access}` as Hex, data: `0x${w.data}` as Hex,
+    name: w.name, writer: evmAddress(w.writer),
+  };
+  const sealed = bytesToHex(new TextEncoder().encode(formatCoffer(f)));
+  return { functionName: "write" as const, args: [args, sealed, b64ToHex(w.pqSig)] as const };
+}
+
 /** Every file id this address was ever a reader of (newest last), from the contract. */
 export async function filesOf(net: EvmNetwork, address: string): Promise<string[]> {
   const ids = (await call(net, "filesOf", [evmAddress(address)])) as unknown as Hex[];
@@ -176,7 +196,7 @@ export async function filesOf(net: EvmNetwork, address: string): Promise<string[
 /** A file as delivered on chain: the sealed text of its latest change. */
 export interface DeliveredFile { id: string; name: string; owner: string; epoch: bigint; version: bigint; height: number; text: string }
 
-/** The newest sealed copy of a file, read from its HeadSet event. null if it was never recorded. */
+/** The newest sealed copy of a file (its latest change or write), read from its HeadSet event. null if it was never recorded. */
 export async function readFile(net: EvmNetwork, fileId: string): Promise<DeliveredFile | null> {
   const head = await readHead(net, fileId);
   if (!head) return null;
@@ -184,7 +204,7 @@ export async function readFile(net: EvmNetwork, fileId: string): Promise<Deliver
   const logs = await rpc<{ data: Hex; topics: Hex[] }[]>(net.evm, "eth_getLogs", [{ address: net.coffer, fromBlock: toHex(head.height), toBlock: toHex(head.height), topics }]);
   for (const log of logs.reverse()) {
     const ev = decodeEventLog({ abi: COFFER_ABI, eventName: "HeadSet", data: log.data, topics: log.topics as [Hex, ...Hex[]] });
-    if (ev.args.epoch !== head.epoch) continue;
+    if (ev.args.epoch !== head.epoch || ev.args.version !== head.version) continue;
     return { id: fileId, name: ev.args.name, owner: head.owner, epoch: head.epoch, version: ev.args.version, height: head.height, text: new TextDecoder().decode(hexToBytes(ev.args.sealedFile)) };
   }
   throw new CofferError("EVM_ERROR", "the file's record could not be read back from the chain");
@@ -193,12 +213,36 @@ export async function readFile(net: EvmNetwork, fileId: string): Promise<Deliver
 // ---- opens -----------------------------------------------------------------------
 
 /** One recorded open of a file. */
-export interface OpenLog { reader: string; epoch: bigint; block: number }
+export interface OpenLog { reader: string; epoch: bigint; version: bigint; block: number }
 
 /** Every open of a file, oldest first: the access log, read from the contract. */
 export async function readOpens(net: EvmNetwork, fileId: string): Promise<OpenLog[]> {
-  const rows = (await call(net, "opensOf", [`0x${fileId}`])) as unknown as { reader: Hex; epoch: bigint; blockNumber: bigint }[];
-  return [...rows].map((r) => ({ reader: qorAddress(r.reader), epoch: r.epoch, block: Number(r.blockNumber) }));
+  const rows = (await call(net, "opensOf", [`0x${fileId}`])) as unknown as { reader: Hex; epoch: bigint; version: bigint; blockNumber: bigint }[];
+  return [...rows].map((r) => ({ reader: qorAddress(r.reader), epoch: r.epoch, version: r.version, block: Number(r.blockNumber) }));
+}
+
+/** One Opened event as anyone can read it from the public log: the release piece sealed to that open's reply key. */
+export interface PublicOpen { reader: string; epoch: bigint; version: bigint; nonce: bigint; replyKey: string; release: Uint8Array; block: number; tx: string }
+
+/**
+ * Every Opened event of a file, optionally for one reader: exactly what anyone sees with eth_getLogs.
+ * The access log names each open's block, so only those blocks are read.
+ */
+export async function readPublicOpens(net: EvmNetwork, fileId: string, reader?: string): Promise<PublicOpen[]> {
+  const blocks = [...new Set((await readOpens(net, fileId)).filter((o) => !reader || o.reader === reader).map((o) => o.block))];
+  const topics = encodeEventTopics({ abi: COFFER_ABI, eventName: "Opened", args: { file: `0x${fileId}` as Hex, ...(reader ? { reader: evmAddress(reader) } : {}) } });
+  const out: PublicOpen[] = [];
+  for (const block of blocks) {
+    const logs = await rpc<{ data: Hex; topics: Hex[]; blockNumber: Hex; transactionHash: Hex }[]>(net.evm, "eth_getLogs", [{ address: net.coffer, fromBlock: toHex(block), toBlock: toHex(block), topics }]);
+    for (const log of logs) {
+      const ev = decodeEventLog({ abi: COFFER_ABI, eventName: "Opened", data: log.data, topics: log.topics as [Hex, ...Hex[]] });
+      out.push({
+        reader: qorAddress(ev.args.reader), epoch: ev.args.epoch, version: ev.args.version, nonce: ev.args.nonce, replyKey: hex32(ev.args.replyKey),
+        release: hexToBytes(ev.args.release), block: Number(log.blockNumber), tx: log.transactionHash,
+      });
+    }
+  }
+  return out;
 }
 
 /** Is this address on the file's current list (the contract's own check)? */
@@ -215,10 +259,12 @@ export async function deviceUntil(net: EvmNetwork, account: string, deviceKey: U
 }
 
 /** The arguments for open(). `deviceKey` empty when the reader's own account key signed. */
-export function openCall(r: { file: string; epoch: bigint; reader: string; nonce: bigint }, deviceKey: Uint8Array, sig: Uint8Array, release: Uint8Array) {
+export function openCall(r: OpenRequest, deviceKey: Uint8Array, sig: Uint8Array, release: Uint8Array) {
   return {
     functionName: "open" as const,
-    args: [{ file: `0x${r.file}` as Hex, epoch: r.epoch, reader: evmAddress(r.reader), nonce: r.nonce }, bytesToHex(deviceKey), bytesToHex(sig), bytesToHex(release)] as const,
+    args: [{
+      file: `0x${r.file}` as Hex, epoch: r.epoch, version: r.version, reader: evmAddress(r.reader), replyKey: `0x${r.replyKey}` as Hex, nonce: r.nonce,
+    }, bytesToHex(deviceKey), bytesToHex(sig), bytesToHex(release)] as const,
   };
 }
 
@@ -256,6 +302,10 @@ export function refusalText(data: Hex | undefined): string | null {
       case "DeviceNotApproved": return "this device is not approved for that wallet right now";
       case "BadDevice": return "that device key is not valid";
       case "BadRelease": return "the release piece is missing or too large";
+      case "StaleVersion": return `QoreChain already has a newer version of this file (version ${e.args![0]})`;
+      case "NotLatest": return `this is not the latest version: QoreChain has epoch ${e.args![0]}, version ${e.args![1]}. Pull the latest one.`;
+      case "BadAccess": return "the reader list changed since this copy was made: pull the latest one";
+      case "BadReplyKey": return "the open request has no reply key";
     }
   } catch { /* not ours */ }
   return null;

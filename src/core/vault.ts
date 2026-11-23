@@ -1,22 +1,26 @@
-// The .env.coffer file (format 3).
+// The .env.coffer file (format 4).
 //
-// Contents are sealed under a data key made of two pieces:
+// Each version's contents are sealed under a data key made of two pieces:
 //   1. the epoch key, sealed to every current reader (ML-KEM-1024 + X25519 to
 //      the keys in each reader's signed recipient card), and
-//   2. a release piece, sealed only to the file's keeper.
-// A reader gets the release piece by asking: the request is signed and the
-// Coffer contract on QoreChain refuses it unless the reader is on the file's
-// current list. So removing someone, or losing a laptop, stops every copy from
-// opening for that address, and every open is recorded on chain. The keeper
-// holds only the release piece and can never read a file.
+//   2. a release piece made for this version only, sealed to the file's keeper
+//      (and a copy to the owner, so the owner opens without asking).
+// A reader gets the release piece by asking: the request names the file's
+// latest version and a reply key made for this one open, and the Coffer
+// contract on QoreChain refuses it unless the reader is on the file's current
+// list. The keeper seals the piece to the reply key, the contract records the
+// open, and the reader throws the reply key away. So the public record holds
+// nothing a reader's long term key opens later: remove someone, or lose a
+// laptop, and the files and the key on it open nothing more. The keeper holds
+// only release pieces and can never read a file.
 //
-// The owner signs one "change" per change of who can read; the contract checks
-// the same signature before it records the file's head. A reader who later
-// writes new contents signs a "write" for them.
+// The owner signs one "change" per change of who can read; a current reader
+// signs one "write" per new version. The contract checks the same signatures
+// before it records the file's head.
 //
 // Pure: no network, no disk. Keys from chain are passed in by the caller.
 import {
-  EpochKeyManager, openEpochKey, sealBatch, openBatch, seal, open as openEnvelope,
+  EpochKeyManager, openEpochKey, sealBatch, openBatch, seal, open as openEnvelope, generateSealKeys,
   toBase64Url, fromBase64Url, isQoreSealError,
 } from "@qorechain/qoreseal";
 import type { SealKeyPair } from "@qorechain/qoreseal";
@@ -26,11 +30,12 @@ import { keccak_256, sha3_256 } from "@noble/hashes/sha3.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 
-export const FORMAT_VERSION = 3;
+export const FORMAT_VERSION = 4;
 const PURPOSE_EPOCH = "coffer:epoch-key";
 const PURPOSE_ADMIN = "coffer:admin";
-const PURPOSE_RELEASE = "coffer:release"; // the release piece, sealed to the keeper
-const PURPOSE_RELEASE_TO = "coffer:release-to"; // the release piece, sealed to one reader for one open
+const PURPOSE_RELEASE = "coffer:release"; // a version's release piece, sealed to the keeper
+const PURPOSE_RELEASE_OWNER = "coffer:release-owner"; // the same piece, sealed to the owner
+const PURPOSE_RELEASE_TO = "coffer:release-to"; // the same piece, sealed to a one time reply key for one open
 /** Where people should be signing; named in every text a wallet shows. */
 export const SITE = "coffer.jdollar.site";
 
@@ -69,7 +74,6 @@ export interface Change {
 
 /** A reader's signed write of new contents under the current access block. */
 export interface Write {
-  note: string;
   sig: MessageSignature;
 }
 
@@ -86,14 +90,16 @@ export interface CofferFile {
   keeper: string;
   /** Epoch key envelope, sealed to every reader. */
   key: Uint8Array;
-  /** The release piece for this epoch, sealed to the keeper (bound to this file and epoch). */
+  /** This version's release piece, sealed to the keeper (bound to this file, epoch and version). */
   release: Uint8Array;
-  /** Owner-only envelope: member keys, epoch keys and release pieces, so the owner can share and revoke from any machine. */
+  /** The same release piece sealed to the owner, so the owner opens without a request. */
+  ownerCopy: Uint8Array;
+  /** Owner-only envelope: member keys and epoch keys, so the owner can share and revoke from any machine. */
   admin: Uint8Array;
   change: Change;
   version: bigint;
   writer: string;
-  /** The env file, sealed under the data key (epoch key + release piece). */
+  /** The env file, sealed under the data key (epoch key + this version's release piece). */
   data: Uint8Array;
   /** Present when a reader wrote after the owner's last change. */
   write?: Write;
@@ -102,7 +108,6 @@ export interface CofferFile {
 interface AdminState {
   members: Record<string, { k: string; x: string }>; // address -> base64url ML-KEM / X25519 public keys
   history: { epoch: string; key: string }[];
-  releases: { epoch: string; r: string }[];
 }
 
 export class CofferError extends Error {
@@ -140,15 +145,19 @@ function dataKey(ek: { epoch: bigint; key: Uint8Array }, release: Uint8Array) {
 // ---- the texts that get signed (the contract rebuilds them byte for byte) ------
 
 /** The access block: everything that decides who can read. Readers are sorted so order does not matter. */
-export function accessBytes(f: Pick<CofferFile, "v" | "id" | "chainId" | "name" | "owner" | "epoch" | "readers" | "keeper" | "key" | "release" | "admin">): Uint8Array {
+export function accessBytes(f: Pick<CofferFile, "v" | "id" | "chainId" | "name" | "owner" | "epoch" | "readers" | "keeper" | "key" | "admin">): Uint8Array {
   return enc.encode([
     "coffer-access", String(f.v), f.id, f.chainId, f.name, f.owner, f.epoch.toString(),
-    [...f.readers].sort().join(","), f.keeper, sha3hex(f.key), sha3hex(f.release), sha3hex(f.admin),
+    [...f.readers].sort().join(","), f.keeper, sha3hex(f.key), sha3hex(f.admin),
   ].join("\n"));
 }
 
 export const accessHash = (f: Parameters<typeof accessBytes>[0]) => sha3hex(accessBytes(f));
-export const dataHash = (data: Uint8Array) => sha3hex(data);
+
+/** One version's contents: its release piece (keeper's and owner's copies) and the sealed data. */
+export function contentHash(f: Pick<CofferFile, "release" | "ownerCopy" | "data">): string {
+  return sha3hex(enc.encode(["coffer-content", sha3hex(f.release), sha3hex(f.ownerCopy), sha3hex(f.data)].join("\n")));
+}
 
 /** Readers in ascending address order (the order Coffer.sol requires and prints). */
 export function sortByAddress(readers: string[]): string[] {
@@ -169,20 +178,32 @@ export function changeText(a: { id: string; epoch: bigint; version: bigint; acce
     `\nName: ${a.name}\nCan open it: ${sortByAddress(a.readers).join(", ")}\nSign this only on ${SITE}.`;
 }
 
-export function writeText(a: { id: string; epoch: bigint; version: bigint; access: string; data: string; note: string }): string {
-  return `Coffer write v1\nFile: ${a.id}\nEpoch: ${a.epoch}\nVersion: ${a.version}\nAccess: ${a.access}\nData: ${a.data}\n${a.note}`;
+/** Byte for byte Coffer.sol's writeText: what a reader signs to write new contents. */
+export function writeText(a: { id: string; epoch: bigint; version: bigint; access: string; data: string; name: string; writer: string }): string {
+  return `Coffer write v2\nFile: ${a.id}\nEpoch: ${a.epoch}\nVersion: ${a.version}\nAccess: ${a.access}\nData: ${a.data}` +
+    `\nName: ${a.name}\nWriter: ${a.writer}\nSign this only on ${SITE}.`;
 }
 
-export function writerNote(name: string): string {
-  return `Name: ${name}\nNew values written by you.\nSign this only on ${SITE}.`;
-}
-
-/** One request to open a file, as the contract's OpenRequest. */
-export interface OpenRequest { file: string; epoch: bigint; reader: string; nonce: bigint }
+/** One request to open a file, as the contract's OpenRequest. `replyKey` is the hex id of a reply key made for this open. */
+export interface OpenRequest { file: string; epoch: bigint; version: bigint; reader: string; replyKey: string; nonce: bigint }
 
 /** Byte for byte Coffer.sol's openText. */
 export function openText(r: OpenRequest): string {
-  return `Coffer open v1\nFile: ${r.file}\nEpoch: ${r.epoch}\nReader: ${r.reader}\nNonce: ${r.nonce}\nSign this only on ${SITE}.`;
+  return `Coffer open v2\nFile: ${r.file}\nEpoch: ${r.epoch}\nVersion: ${r.version}\nReader: ${r.reader}\nReply key: ${r.replyKey}\nNonce: ${r.nonce}\nSign this only on ${SITE}.`;
+}
+
+/** The id the contract records for a reply key: keccak256 of its ML-KEM-1024 and X25519 public keys, as hex. */
+export function replyKeyId(k: { mlkemPublicKey: Uint8Array; x25519PublicKey: Uint8Array }): string {
+  const b = new Uint8Array(k.mlkemPublicKey.length + k.x25519PublicKey.length);
+  b.set(k.mlkemPublicKey, 0);
+  b.set(k.x25519PublicKey, k.mlkemPublicKey.length);
+  return hex(keccak_256(b));
+}
+
+/** A reply key for one open: made in memory, used once, never stored. */
+export function newReplyKeys(): { keys: SealKeyPair; id: string } {
+  const keys = generateSealKeys();
+  return { keys, id: replyKeyId(keys) };
 }
 
 /** The id the contract gives a device key: keccak256 of its ML-DSA-87 public key, as hex. */
@@ -218,31 +239,32 @@ const fromBase64 = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCode
 
 // ---- the release piece --------------------------------------------------------
 
-const releaseAad = (file: string, epoch: bigint) => enc.encode(`${file}:${epoch}`);
-const releaseToAad = (file: string, epoch: bigint, reader: string, nonce: bigint) => enc.encode(`${file}:${epoch}:${reader}:${nonce}`);
+const releaseAad = (file: string, epoch: bigint, version: bigint) => enc.encode(`${file}:${epoch}:${version}`);
+const releaseToAad = (r: OpenRequest) => enc.encode(`${r.file}:${r.epoch}:${r.version}:${r.reader}:${r.replyKey}:${r.nonce}`);
 
-/** Keeper: unwrap a file's release piece. Fails unless the envelope was made for exactly this file and epoch. */
-export function keeperOpenRelease(a: { chainId: string; file: string; epoch: bigint; envelope: Uint8Array; keeperKeys: SealKeyPair }): Uint8Array {
+/** Keeper: unwrap a version's release piece. Fails unless the envelope was made for exactly this file, epoch and version. */
+export function keeperOpenRelease(a: { chainId: string; file: string; epoch: bigint; version: bigint; envelope: Uint8Array; keeperKeys: SealKeyPair }): Uint8Array {
   try {
-    return openEnvelope({ chainId: a.chainId, purpose: PURPOSE_RELEASE, envelope: a.envelope, keys: a.keeperKeys, aad: releaseAad(a.file, a.epoch) });
+    return openEnvelope({ chainId: a.chainId, purpose: PURPOSE_RELEASE, envelope: a.envelope, keys: a.keeperKeys, aad: releaseAad(a.file, a.epoch, a.version) });
   } catch {
-    throw new CofferError("BAD_RELEASE", "that release piece was not sealed to this keeper for this file and epoch");
+    throw new CofferError("BAD_RELEASE", "that release piece was not sealed to this keeper for this file and version");
   }
 }
 
-/** Keeper: seal the release piece to one reader for one open request. */
-export function sealReleaseTo(a: { chainId: string; file: string; epoch: bigint; reader: Reader; nonce: bigint; release: Uint8Array }): Uint8Array {
+/** Keeper: seal the release piece to the reply key named in a signed open request. Refuses any other key. */
+export function sealReleaseTo(a: { chainId: string; request: OpenRequest; reply: { mlkemPublicKey: Uint8Array; x25519PublicKey: Uint8Array }; release: Uint8Array }): Uint8Array {
+  if (replyKeyId(a.reply) !== a.request.replyKey) throw new CofferError("BAD_REPLY_KEY", "the reply key is not the one the request names");
   return seal({
     chainId: a.chainId, purpose: PURPOSE_RELEASE_TO, mode: "hybrid",
-    recipients: [{ mlkemPublicKey: a.reader.mlkemPublicKey, x25519PublicKey: a.reader.x25519PublicKey }],
-    plaintext: a.release, aad: releaseToAad(a.file, a.epoch, a.reader.address, a.nonce),
+    recipients: [{ mlkemPublicKey: a.reply.mlkemPublicKey, x25519PublicKey: a.reply.x25519PublicKey }],
+    plaintext: a.release, aad: releaseToAad(a.request),
   });
 }
 
-/** Reader: open the release piece the keeper sealed to it for this request. */
-export function openReleaseTo(a: { chainId: string; file: string; epoch: bigint; reader: string; nonce: bigint; sealed: Uint8Array; keys: SealKeyPair }): Uint8Array {
+/** Reader: open the release piece the keeper sealed to this open's reply key. */
+export function openReleaseTo(a: { chainId: string; request: OpenRequest; sealed: Uint8Array; replyKeys: SealKeyPair }): Uint8Array {
   try {
-    return openEnvelope({ chainId: a.chainId, purpose: PURPOSE_RELEASE_TO, envelope: a.sealed, keys: a.keys, aad: releaseToAad(a.file, a.epoch, a.reader, a.nonce) });
+    return openEnvelope({ chainId: a.chainId, purpose: PURPOSE_RELEASE_TO, envelope: a.sealed, keys: a.replyKeys, aad: releaseToAad(a.request) });
   } catch {
     throw new CofferError("BAD_RELEASE", "the release piece does not open with this key");
   }
@@ -250,19 +272,18 @@ export function openReleaseTo(a: { chainId: string; file: string; epoch: bigint;
 
 // ---- building ----------------------------------------------------------------
 
-type Members = Record<string, { mlkemPublicKey: Uint8Array; x25519PublicKey: Uint8Array }>;
-type Releases = Map<string, Uint8Array>; // epoch -> release piece
+type Keys = { mlkemPublicKey: Uint8Array; x25519PublicKey: Uint8Array };
+type Members = Record<string, Keys>;
 
-function sealAdmin(chainId: string, owner: { mlkemPublicKey: Uint8Array; x25519PublicKey: Uint8Array }, mgr: EpochKeyManager, members: Members, releases: Releases): Uint8Array {
+function sealAdmin(chainId: string, owner: Keys, mgr: EpochKeyManager, members: Members): Uint8Array {
   const state: AdminState = {
     members: Object.fromEntries(Object.entries(members).map(([a, k]) => [a, { k: toBase64Url(k.mlkemPublicKey), x: toBase64Url(k.x25519PublicKey) }])),
     history: mgr.exportKeys().map((k) => ({ epoch: k.epoch.toString(), key: toBase64Url(k.key) })),
-    releases: [...releases].map(([epoch, r]) => ({ epoch, r: toBase64Url(r) })),
   };
   return seal({ chainId, purpose: PURPOSE_ADMIN, recipients: [owner], plaintext: enc.encode(JSON.stringify(state)), mode: "hybrid" });
 }
 
-function openAdmin(f: CofferFile, ownerSeal: SealKeyPair): { mgr: EpochKeyManager; members: Members; releases: Releases } {
+function openAdmin(f: CofferFile, ownerSeal: SealKeyPair): { mgr: EpochKeyManager; members: Members } {
   let state: AdminState;
   try {
     state = JSON.parse(dec.decode(openEnvelope({ chainId: f.chainId, purpose: PURPOSE_ADMIN, envelope: f.admin, keys: ownerSeal })));
@@ -274,47 +295,57 @@ function openAdmin(f: CofferFile, ownerSeal: SealKeyPair): { mgr: EpochKeyManage
     chainId: f.chainId, purpose: PURPOSE_EPOCH, mode: "hybrid", members,
     history: state.history.map((h) => ({ epoch: BigInt(h.epoch), key: fromBase64Url(h.key) })),
   });
-  const releases: Releases = new Map((state.releases ?? []).map((x) => [x.epoch, fromBase64Url(x.r)]));
-  return { mgr, members, releases };
+  return { mgr, members };
 }
 
-/** Owner: the release piece of the file's current epoch, from the owner's own envelope (no request needed). */
+/** Owner: this version's release piece, from the owner's own copy (no request needed, so not logged). */
 export function ownerRelease(f: CofferFile, ownerSeal: SealKeyPair): Uint8Array {
-  const r = openAdmin(f, ownerSeal).releases.get(f.epoch.toString());
-  if (!r) throw new CofferError("BAD_RELEASE", "the owner's copy has no release piece for this epoch");
-  return r;
+  try {
+    return openEnvelope({ chainId: f.chainId, purpose: PURPOSE_RELEASE_OWNER, envelope: f.ownerCopy, keys: ownerSeal, aad: releaseAad(f.id, f.epoch, f.version) });
+  } catch {
+    throw new CofferError("BAD_RELEASE", "the owner's copy of the release piece does not open with this key");
+  }
+}
+
+/** One version's contents: a fresh release piece for the keeper and the owner, and the data sealed under both pieces. */
+function sealVersion(a: {
+  chainId: string; id: string; owner: string; epochKey: { epoch: bigint; key: Uint8Array }; version: bigint;
+  keeper: Keys; ownerKeys: Keys; plaintext: Uint8Array;
+}): Pick<CofferFile, "release" | "ownerCopy" | "data"> {
+  const r = crypto.getRandomValues(new Uint8Array(32));
+  const aad = releaseAad(a.id, a.epochKey.epoch, a.version);
+  const to = (purpose: string, k: Keys) => seal({
+    chainId: a.chainId, purpose, mode: "hybrid", recipients: [{ mlkemPublicKey: k.mlkemPublicKey, x25519PublicKey: k.x25519PublicKey }], plaintext: r, aad,
+  });
+  const data = sealBatch({ epochKey: dataKey(a.epochKey, r), context: context({ chainId: a.chainId, owner: a.owner, id: a.id }), batchIndex: a.version, data: a.plaintext }).blob;
+  return { release: to(PURPOSE_RELEASE, a.keeper), ownerCopy: to(PURPOSE_RELEASE_OWNER, a.ownerKeys), data };
 }
 
 async function build(
   base: { id: string; chainId: string; name: string; owner: string },
-  mgr: EpochKeyManager, members: Members, releases: Releases, envelope: Uint8Array,
+  mgr: EpochKeyManager, members: Members, envelope: Uint8Array,
   owner: Signer, keeper: Reader, version: bigint, plaintext: Uint8Array,
 ): Promise<CofferFile> {
   const ownerKeys = members[base.owner];
   if (!ownerKeys) throw new CofferError("OWNER_NOT_MEMBER", "the owner must stay a reader");
   const epoch = mgr.epoch;
-  const r = crypto.getRandomValues(new Uint8Array(32));
-  releases.set(epoch.toString(), r);
-  const release = seal({
-    chainId: base.chainId, purpose: PURPOSE_RELEASE, mode: "hybrid",
-    recipients: [{ mlkemPublicKey: keeper.mlkemPublicKey, x25519PublicKey: keeper.x25519PublicKey }],
-    plaintext: r, aad: releaseAad(base.id, epoch),
-  });
+  // Only these fields carry over: a reader's earlier write belongs to the version it wrote, not to this change.
   const head = {
-    v: FORMAT_VERSION, ...base, epoch, readers: mgr.members().sort(), keeper: keeper.address,
-    key: envelope, release, admin: sealAdmin(base.chainId, ownerKeys, mgr, members, releases),
+    v: FORMAT_VERSION, id: base.id, chainId: base.chainId, name: base.name, owner: base.owner,
+    epoch, readers: mgr.members().sort(), keeper: keeper.address,
+    key: envelope, admin: sealAdmin(base.chainId, ownerKeys, mgr, members),
   };
-  const data = sealBatch({ epochKey: dataKey(mgr.currentKey, r), context: context(base), batchIndex: version, data: plaintext }).blob;
+  const content = sealVersion({ chainId: base.chainId, id: base.id, owner: base.owner, epochKey: mgr.currentKey, version, keeper, ownerKeys, plaintext });
   const access = accessHash(head);
-  const dh = dataHash(data);
+  const dh = contentHash(content);
   // The contract takes a sealed file of at most 64 KB. Check before the owner signs anything,
   // with a stand-in signature of the real size, so nobody approves a change that cannot be recorded.
-  const size = enc.encode(formatCoffer({ ...head, change: { version, data: dh, sig: SIZE_PROBE_SIG }, version, writer: base.owner, data })).length;
+  const size = enc.encode(formatCoffer({ ...head, ...content, change: { version, data: dh, sig: SIZE_PROBE_SIG }, version, writer: base.owner })).length;
   if (size > MAX_SEALED_FILE) {
     throw new CofferError("TOO_MANY_READERS", `a sealed file holds about ${MAX_READERS_HINT} people; this one would be ${Math.ceil(size / 1024)} KB with ${head.readers.length}. Split the readers across two files.`);
   }
   const sig = await owner.sign(base.chainId, enc.encode(changeText({ id: base.id, epoch, version, access, data: dh, name: base.name, readers: head.readers })));
-  return { ...head, change: { version, data: dh, sig }, version, writer: base.owner, data };
+  return { ...head, ...content, change: { version, data: dh, sig }, version, writer: base.owner };
 }
 
 /** Coffer.sol's MAX_FILE, less a margin for a slightly longer signature encoding. */
@@ -334,7 +365,7 @@ export async function createCoffer(args: {
   const members: Members = { [args.owner.address]: { mlkemPublicKey: args.ownerKeys.mlkemPublicKey, x25519PublicKey: args.ownerKeys.x25519PublicKey } };
   for (const r of args.readers ?? []) members[r.address] = { mlkemPublicKey: r.mlkemPublicKey, x25519PublicKey: r.x25519PublicKey };
   const mgr = new EpochKeyManager({ chainId: args.chainId, purpose: PURPOSE_EPOCH, mode: "hybrid", members });
-  return build({ id: newFileId(), chainId: args.chainId, name: args.name, owner: args.owner.address }, mgr, members, new Map(), mgr.distribution(), args.owner, args.keeper, 1n, args.plaintext);
+  return build({ id: newFileId(), chainId: args.chainId, name: args.name, owner: args.owner.address }, mgr, members, mgr.distribution(), args.owner, args.keeper, 1n, args.plaintext);
 }
 
 /** The epoch key this reader holds for the file's current epoch. */
@@ -366,25 +397,29 @@ export function openCoffer(f: CofferFile, keys: SealKeyPair, release: Uint8Array
   return b.data;
 }
 
-/** Any reader can write new contents under the current epoch (with the release piece of an open); readers are unchanged. */
-export async function updateCoffer(f: CofferFile, writer: Signer, writerSeal: SealKeyPair, release: Uint8Array, plaintext: Uint8Array): Promise<CofferFile> {
+/**
+ * Any current reader can write new contents under the current epoch; readers are unchanged.
+ * The new version gets its own release piece, sealed to the keeper and to the owner (keys from
+ * their cards on chain), so nobody's earlier release piece opens it.
+ */
+export async function updateCoffer(f: CofferFile, writer: Signer, writerSeal: SealKeyPair, keeper: Reader, owner: Reader, plaintext: Uint8Array): Promise<CofferFile> {
   if (!f.readers.includes(writer.address)) throw new CofferError("NOT_A_READER", "only a reader can write this file");
+  if (owner.address !== f.owner) throw new CofferError("WRONG_OWNER", `this file's owner is ${f.owner}, not ${owner.address}`);
   const ek = epochKeyFor(f, writerSeal);
-  openCoffer(f, writerSeal, release); // the release piece must be this epoch's
+  if (ek.epoch !== f.epoch) throw new CofferError("EPOCH_MISMATCH", `key envelope is for epoch ${ek.epoch}, file says ${f.epoch}`);
   const version = f.version + 1n;
-  const data = sealBatch({ epochKey: dataKey(ek, release), context: context(f), batchIndex: version, data: plaintext }).blob;
-  const note = writerNote(f.name);
-  const text = writeText({ id: f.id, epoch: f.epoch, version, access: accessHash(f), data: dataHash(data), note });
+  const content = sealVersion({ chainId: f.chainId, id: f.id, owner: f.owner, epochKey: ek, version, keeper: sameKeeper(f, keeper), ownerKeys: owner, plaintext });
+  const text = writeText({ id: f.id, epoch: f.epoch, version, access: accessHash(f), data: contentHash(content), name: f.name, writer: writer.address });
   const sig = await writer.sign(f.chainId, enc.encode(text));
-  return { ...f, version, writer: writer.address, data, write: { note, sig } };
+  return { ...f, ...content, version, writer: writer.address, write: { sig } };
 }
 
 /** Add readers, or replace a reader's keys after they signed a new card. New epoch; reseals the contents. Owner only. */
-export async function shareCoffer(f: CofferFile, owner: Signer, ownerSeal: SealKeyPair, keeper: Reader, readers: Reader[]): Promise<CofferFile> {
+export async function shareCoffer(f: CofferFile, owner: Signer, ownerSeal: SealKeyPair, keeper: Reader, readers: Reader[], release?: Uint8Array): Promise<CofferFile> {
   if (owner.address !== f.owner) throw new CofferError("NOT_OWNER", "only the owner of this file can change who reads it");
   if (!readers.length) throw new CofferError("NOTHING_TO_DO", "no readers given");
-  const { mgr, members, releases } = openAdmin(f, ownerSeal);
-  const plaintext = openCoffer(f, ownerSeal, releaseOf(releases, f));
+  const { mgr, members } = openAdmin(f, ownerSeal);
+  const plaintext = openCoffer(f, ownerSeal, release ?? ownerRelease(f, ownerSeal));
   let envelope: Uint8Array | null = null;
   for (const r of readers) {
     const keys = { mlkemPublicKey: r.mlkemPublicKey, x25519PublicKey: r.x25519PublicKey };
@@ -392,20 +427,21 @@ export async function shareCoffer(f: CofferFile, owner: Signer, ownerSeal: SealK
     envelope = mgr.addMember(r.address, keys).envelope;
   }
   if (!envelope) throw new CofferError("NOTHING_TO_DO", "no readers given");
-  return build(f, mgr, members, releases, envelope, owner, sameKeeper(f, keeper), f.version + 1n, plaintext);
+  return build(f, mgr, members, envelope, owner, sameKeeper(f, keeper), f.version + 1n, plaintext);
 }
 
 /**
  * Remove readers. Starts a new epoch they cannot open and reseals the contents.
- * With the keeper, they cannot open older copies they never opened either. What
- * they already opened they may have kept: `rotate` lists every key in the file.
+ * From then on the contract refuses their opens, and no release piece on the
+ * public record opens with their key, so no copy they hold opens for them.
+ * What they already opened they may have kept: `rotate` lists every key in the file.
  */
-export async function revokeCoffer(f: CofferFile, owner: Signer, ownerSeal: SealKeyPair, keeper: Reader, addresses: string[], keyNames: (plaintext: Uint8Array) => string[]): Promise<{ file: CofferFile; rotate: string[] }> {
+export async function revokeCoffer(f: CofferFile, owner: Signer, ownerSeal: SealKeyPair, keeper: Reader, addresses: string[], keyNames: (plaintext: Uint8Array) => string[], release?: Uint8Array): Promise<{ file: CofferFile; rotate: string[] }> {
   if (owner.address !== f.owner) throw new CofferError("NOT_OWNER", "only the owner of this file can change who reads it");
   if (addresses.includes(f.owner)) throw new CofferError("OWNER_NOT_MEMBER", "the owner cannot be removed");
   if (!addresses.length) throw new CofferError("NOTHING_TO_DO", "no readers given");
-  const { mgr, members, releases } = openAdmin(f, ownerSeal);
-  const plaintext = openCoffer(f, ownerSeal, releaseOf(releases, f));
+  const { mgr, members } = openAdmin(f, ownerSeal);
+  const plaintext = openCoffer(f, ownerSeal, release ?? ownerRelease(f, ownerSeal));
   let envelope: Uint8Array | null = null;
   for (const a of addresses) {
     if (!members[a]) throw new CofferError("NOT_A_READER", `${a} is not a reader`);
@@ -413,13 +449,7 @@ export async function revokeCoffer(f: CofferFile, owner: Signer, ownerSeal: Seal
     envelope = mgr.removeMember(a).envelope;
   }
   if (!envelope) throw new CofferError("NOTHING_TO_DO", "no readers given");
-  return { file: await build(f, mgr, members, releases, envelope, owner, sameKeeper(f, keeper), f.version + 1n, plaintext), rotate: keyNames(plaintext) };
-}
-
-function releaseOf(releases: Releases, f: CofferFile) {
-  const r = releases.get(f.epoch.toString());
-  if (!r) throw new CofferError("BAD_RELEASE", "the owner's copy has no release piece for this epoch");
-  return r;
+  return { file: await build(f, mgr, members, envelope, owner, sameKeeper(f, keeper), f.version + 1n, plaintext), rotate: keyNames(plaintext) };
 }
 
 function sameKeeper(f: CofferFile, keeper: Reader) {
@@ -445,16 +475,17 @@ export function verifyCoffer(f: CofferFile, pqKeys: Record<string, Uint8Array>):
   };
   if (!f.readers.includes(f.owner)) throw new CofferError("OWNER_NOT_MEMBER", "the owner is not a reader of this file");
   const access = accessHash(f);
+  const data = contentHash(f);
   check(f.owner, changeText({ id: f.id, epoch: f.epoch, version: f.change.version, access, data: f.change.data, name: f.name, readers: f.readers }), f.change.sig, "owner's");
   if (!f.write) {
-    if (f.version !== f.change.version || dataHash(f.data) !== f.change.data || f.writer !== f.owner) {
+    if (f.version !== f.change.version || data !== f.change.data || f.writer !== f.owner) {
       throw new CofferError("BAD_SIGNATURE", "the contents are not the ones the owner signed: this file was changed by someone else");
     }
     return;
   }
   if (!f.readers.includes(f.writer)) throw new CofferError("WRITER_NOT_READER", `${f.writer} wrote this file but is not a reader`);
   if (f.version <= f.change.version) throw new CofferError("BAD_FORMAT", "a write must come after the owner's change");
-  check(f.writer, writeText({ id: f.id, epoch: f.epoch, version: f.version, access, data: dataHash(f.data), note: f.write.note }), f.write.sig, "writer's");
+  check(f.writer, writeText({ id: f.id, epoch: f.epoch, version: f.version, access, data, name: f.name, writer: f.writer }), f.write.sig, "writer's");
 }
 
 /** The file's head as the Coffer contract records it. */
@@ -462,9 +493,10 @@ export interface ChainHead { owner: string; epoch: bigint; version: bigint; acce
 
 /**
  * Compare a file with its head on chain. Throws CofferError:
- * UNRECORDED (no head yet, or a newer epoch than the chain knows),
- * OWNER_MISMATCH (the id belongs to someone else), STALE (an older copy:
- * someone removed since may still be in it), FORKED (same epoch, other access).
+ * UNRECORDED (no head yet, or newer than the chain knows),
+ * OWNER_MISMATCH (the id belongs to someone else), STALE (an older copy or
+ * version: someone removed since may still be in it, or the values changed),
+ * FORKED (same version, other readers or contents).
  */
 export function checkHead(f: CofferFile, head: ChainHead | null): void {
   if (!head) throw new CofferError("UNRECORDED", "this file is not recorded on QoreChain, so Coffer cannot tell if it is the latest copy");
@@ -472,6 +504,9 @@ export function checkHead(f: CofferFile, head: ChainHead | null): void {
   if (f.epoch < head.epoch) throw new CofferError("STALE", `this is an old copy: QoreChain has a newer one (epoch ${head.epoch}, this is ${f.epoch}). Someone removed since then may still be in it.`);
   if (f.epoch > head.epoch) throw new CofferError("UNRECORDED", `this copy (epoch ${f.epoch}) is newer than the one QoreChain knows (epoch ${head.epoch})`);
   if (head.access !== accessHash(f)) throw new CofferError("FORKED", "QoreChain has a different reader list for this version of the file");
+  if (f.version < head.version) throw new CofferError("STALE", `this is an older version: QoreChain has version ${head.version}, this is ${f.version}. Pull the latest one.`);
+  if (f.version > head.version) throw new CofferError("UNRECORDED", `this version (${f.version}) is newer than the one QoreChain knows (${head.version})`);
+  if (head.data !== contentHash(f)) throw new CofferError("FORKED", "QoreChain has different contents for this version of the file");
 }
 
 /** What to send to the contract's setHead for the file's current change (the sealed file goes with it). */
@@ -483,11 +518,20 @@ export function headArgs(f: CofferFile) {
   };
 }
 
+/** What to send to the contract's write for a reader's write (the sealed file goes with it). */
+export function writeArgs(f: CofferFile) {
+  if (!f.write) throw new CofferError("NOTHING_TO_DO", "this version was not written by a reader");
+  return {
+    file: f.id, epoch: f.epoch, version: f.version, access: accessHash(f), data: contentHash(f), name: f.name, writer: f.writer,
+    pqSig: f.write.sig.pq?.signature ?? "",
+  };
+}
+
 // ---- text format -----------------------------------------------------------
 
 const HEADER = [
   "# Sealed by Coffer. Safe to commit: only the readers below can open it, and only while they are on the list.",
-  "# ML-KEM-1024 + X25519 to QoreChain addresses, signed with ML-DSA-87, every change and every open recorded on QoreChain.",
+  "# ML-KEM-1024 + X25519 to QoreChain addresses, signed with ML-DSA-87; every change, write and reader's open recorded on QoreChain.",
   "# Run with it: npx github:jenzylove/coffer run -- <command>",
 ];
 
@@ -499,7 +543,8 @@ export function formatCoffer(f: CofferFile): string {
     ...HEADER, "",
     `coffer: ${f.v}`, `id: ${f.id}`, `chain: ${f.chainId}`, `name: ${f.name}`, `owner: ${f.owner}`,
     `epoch: ${f.epoch}`, `readers: ${f.readers.join(" ")}`, `keeper: ${f.keeper}`,
-    `key: ${toBase64Url(f.key)}`, `release: ${toBase64Url(f.release)}`, `admin: ${toBase64Url(f.admin)}`, `change: ${jsonText(f.change)}`,
+    `key: ${toBase64Url(f.key)}`, `release: ${toBase64Url(f.release)}`, `owner-copy: ${toBase64Url(f.ownerCopy)}`,
+    `admin: ${toBase64Url(f.admin)}`, `change: ${jsonText(f.change)}`,
     `version: ${f.version}`, `writer: ${f.writer}`,
     `data: ${toBase64Url(f.data)}`, `write: ${f.write ? jsonText(f.write) : "-"}`,
   ];
@@ -521,7 +566,7 @@ export function parseCoffer(text: string): CofferFile {
     return v;
   };
   const v = Number(need("coffer"));
-  if (v === 1 || v === 2) throw new CofferError("OLD_FORMAT", "this file uses an earlier Coffer format, from before every open was checked on chain. Ask the owner to seal it again.");
+  if (v === 1 || v === 2 || v === 3) throw new CofferError("OLD_FORMAT", "this file uses an earlier Coffer format. Ask the owner to seal it again.");
   if (v !== FORMAT_VERSION) throw new CofferError("BAD_FORMAT", `unsupported Coffer format ${v}`);
   if (!/^[0-9a-f]{32}$/.test(need("id"))) throw new CofferError("BAD_FORMAT", "bad file id");
   try {
@@ -533,10 +578,10 @@ export function parseCoffer(text: string): CofferFile {
     return {
       v, id: need("id"), chainId: need("chain"), name: need("name"), owner: need("owner"), epoch: BigInt(need("epoch")),
       readers: need("readers").split(/\s+/).filter(Boolean), keeper: need("keeper"),
-      key: fromBase64Url(need("key")), release: fromBase64Url(need("release")), admin: fromBase64Url(need("admin")), change,
+      key: fromBase64Url(need("key")), release: fromBase64Url(need("release")), ownerCopy: fromBase64Url(need("owner-copy")), admin: fromBase64Url(need("admin")), change,
       version: BigInt(need("version")), writer: need("writer"),
       data: fromBase64Url(need("data")),
-      ...(wr ? { write: { note: String(wr.note), sig: wr.sig } } : {}),
+      ...(wr ? { write: { sig: wr.sig } } : {}),
     };
   } catch (e) {
     if (e instanceof CofferError) throw e;

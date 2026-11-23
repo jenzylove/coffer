@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import { identityFromMnemonic, newMnemonic, type Identity } from "../core/identity.ts";
 import {
   createCoffer, openCoffer, shareCoffer, revokeCoffer, updateCoffer, verifyCoffer, checkHead, localSigner,
-  ownerRelease, openReleaseTo, signOpen, newNonce,
+  ownerRelease, openReleaseTo, signOpen, newNonce, newReplyKeys, type OpenRequest,
   formatCoffer, parseCoffer, CofferError, type CofferFile,
 } from "../core/vault.ts";
 import { signCard } from "../core/card.ts";
@@ -34,7 +34,7 @@ const RELAYER = `${SERVER}/api/drip`;
 const contractUrl = (hash: string) => `https://dashboard.qorechain.io/explorer/tx/${hash}`;
 
 /** Ask the Coffer server to submit a signed card or change to the contract (it pays the gas, it cannot forge either). */
-async function post(path: "/api/card" | "/api/head", body: unknown): Promise<{ hash: string; block: number }> {
+async function post(path: "/api/card" | "/api/head" | "/api/write", body: unknown): Promise<{ hash: string; block: number }> {
   const r = await fetch(`${SERVER}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
   const b = r ? ((await r.json().catch(() => ({}))) as any) : {};
   if (!r?.ok) throw new ChainError("NOT_RECORDED", `QoreChain did not record it${b.error ? `: ${b.error}` : r ? ` (server ${r.status})` : ": the Coffer server is not reachable"}`);
@@ -44,6 +44,11 @@ async function post(path: "/api/card" | "/api/head", body: unknown): Promise<{ h
 /** Record the owner's change on chain. Called before the file is written, so no unrecorded copy exists. */
 async function recordHead(f: CofferFile) {
   const t = await post("/api/head", { file: formatCoffer(f) });
+  say(`  recorded on QoreChain: ${t.hash}  ${c.dim(contractUrl(t.hash))}`);
+}
+/** Record a new version written under the current readers (the contract checks the writer is on the list). */
+async function recordWrite(f: CofferFile) {
+  const t = await post("/api/write", { file: formatCoffer(f) });
   say(`  recorded on QoreChain: ${t.hash}  ${c.dim(contractUrl(t.hash))}`);
 }
 const enc = new TextEncoder();
@@ -181,21 +186,36 @@ async function keeperReader() {
 }
 
 /**
- * The release piece for this file: the owner holds its own copy; a reader asks, and the contract
- * refuses unless the reader is on the current list. Every reader's open is recorded on QoreChain.
+ * The release piece for this version: the owner holds its own copy; a reader asks with a request
+ * naming this version and a reply key made for this one open, and the contract refuses unless the
+ * reader is on the current list. The reply key lives only in memory here, so the release recorded
+ * on QoreChain can never be opened again, not even with this identity file.
  */
 async function releaseFor(f: CofferFile, id: Identity): Promise<Uint8Array> {
-  if (id.address === f.owner) return ownerRelease(f, id.sealKeys);
-  const req = { file: f.id, epoch: f.epoch, reader: id.address, nonce: newNonce() };
+  if (id.address === f.owner) {
+    try { return ownerRelease(f, id.sealKeys); } catch { /* a writer sealed the owner's copy to an old card: ask like any reader */ }
+  }
+  const reply = newReplyKeys();
+  const req: OpenRequest = { file: f.id, epoch: f.epoch, version: f.version, reader: id.address, replyKey: reply.id, nonce: newNonce() };
   const sig = await signOpen(net.chainId, req, { account: localSigner(id) });
   const r = await fetch(`${SERVER}/api/open`, {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ...req, epoch: req.epoch.toString(), nonce: req.nonce.toString(), sig: toBase64Url(sig), release: toBase64Url(f.release) }),
+    body: JSON.stringify({
+      ...req, epoch: req.epoch.toString(), version: req.version.toString(), nonce: req.nonce.toString(), sig: toBase64Url(sig), release: toBase64Url(f.release),
+      replyMlkem: toBase64Url(reply.keys.mlkemPublicKey), replyX25519: toBase64Url(reply.keys.x25519PublicKey),
+    }),
   }).catch(() => null);
   const b = r ? ((await r.json().catch(() => ({}))) as any) : {};
   if (!r?.ok) throw new ChainError(r?.status === 403 ? "REFUSED_BY_CHAIN" : "NOT_OPENED", `QoreChain did not release this file to you${b.error ? `: ${b.error}` : r ? ` (server ${r.status})` : ": the Coffer server is not reachable"}`);
   console.error(c.dim(`opened through QoreChain: ${b.hash}`));
-  return openReleaseTo({ chainId: net.chainId, file: f.id, epoch: f.epoch, reader: id.address, nonce: req.nonce, sealed: fromBase64Url(b.sealed), keys: id.sealKeys });
+  return openReleaseTo({ chainId: net.chainId, request: req, sealed: fromBase64Url(b.sealed), replyKeys: reply.keys });
+}
+
+/** A new version of the values: sealed with its own release piece, signed by this identity, recorded on QoreChain. */
+async function writeValues(f: CofferFile, id: Identity, entries: DotenvEntry[]) {
+  const g = await updateCoffer(f, localSigner(id), id.sealKeys, await keeperReader(), await fetchReader(evmNet, f.owner), enc.encode(serializeDotenv(entries)));
+  await recordWrite(g);
+  return g;
 }
 
 async function entriesOf(f: CofferFile, id: Identity): Promise<DotenvEntry[]> {
@@ -285,7 +305,7 @@ async function lock(pos: string[], flags: Record<string, string | true>) {
     if (typeof flags.to === "string") throw new CofferError("USAGE", `${sealedPath} already exists; add readers with "coffer share <qor1...>"`);
     const f = readSealed(sealedPath);
     await checkFile(f, { path: sealedPath, acceptOwner: flags["accept-owner"] === true });
-    const g = await updateCoffer(f, localSigner(id), id.sealKeys, await releaseFor(f, id), enc.encode(serializeDotenv(entries)));
+    const g = await writeValues(f, id, entries);
     writeSealed(sealedPath, g);
     say(`${c.green("sealed")} ${entries.length} values into ${sealedPath} ${c.dim(`(version ${g.version}, readers unchanged: ${g.readers.length})`)}`);
   } else {
@@ -403,7 +423,7 @@ async function setCmd(pos: string[], flags: Record<string, string | true>, unset
       if (e) e.value = value; else entries.push({ key, value });
     }
   }
-  const g = await updateCoffer(f, localSigner(id), id.sealKeys, release, enc.encode(serializeDotenv(entries)));
+  const g = await writeValues(f, id, entries);
   writeSealed(path, g);
   say(`${c.green(unset ? "removed" : "set")} ${pos.map((p) => p.split("=")[0]).join(", ")} in ${path} ${c.dim(`(version ${g.version})`)}`);
 }
@@ -442,7 +462,7 @@ async function pull(pos: string[], flags: Record<string, string | true>) {
   if (!f.readers.includes(me)) throw new CofferError("NOT_A_READER", `you were removed from ${d.name}: its latest version is not sealed to you, so there is nothing for you to open`);
   await checkFile(f, { path, acceptOwner: flags["accept-owner"] === true });
   writeSealed(path, f);
-  say(`${c.green("pulled")} ${d.name} (epoch ${d.epoch}) from QoreChain into ${path}`);
+  say(`${c.green("pulled")} ${d.name} (epoch ${d.epoch}, version ${d.version}) from QoreChain into ${path}`);
 }
 
 async function status(flags: Record<string, string | true>) {
@@ -462,10 +482,10 @@ async function status(flags: Record<string, string | true>) {
   }
   const head = await readHead(evmNet, f.id);
   if (!head) say(`  on QoreChain: ${c.red("not recorded")}`);
-  else say(`  on QoreChain: epoch ${head.epoch}, owner ${head.owner}, recorded at block ${head.height} ${c.dim(`(contract ${evmNet.coffer})`)}`);
+  else say(`  on QoreChain: epoch ${head.epoch}, version ${head.version}, owner ${head.owner}, recorded at block ${head.height} ${c.dim(`(contract ${evmNet.coffer})`)}`);
   const opens = head ? await readOpens(evmNet, f.id) : [];
   say(`  opened through QoreChain: ${opens.length} time${opens.length === 1 ? "" : "s"}`);
-  for (const o of opens.slice(-8)) say(c.dim(`    ${o.reader}  epoch ${o.epoch}  block ${o.block}`));
+  for (const o of opens.slice(-8)) say(c.dim(`    ${o.reader}  epoch ${o.epoch}  version ${o.version}  block ${o.block}`));
 }
 
 function askHidden(prompt: string): Promise<string> {

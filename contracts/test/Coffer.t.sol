@@ -188,6 +188,12 @@ contract CofferTest is Test {
         vm.expectRevert(abi.encodeWithSelector(Coffer.StaleEpoch.selector, uint64(3)));
         c.setHead(old, FILE_TEXT, SIG);
 
+        // a newer epoch must also carry a newer version
+        Coffer.Change memory sameVersion = change(4, 12);
+        allowHead(sameVersion);
+        vm.expectRevert(abi.encodeWithSelector(Coffer.StaleVersion.selector, uint64(12)));
+        c.setHead(sameVersion, FILE_TEXT, SIG);
+
         Coffer.Change memory next = change(4, 13);
         allowHead(next);
         c.setHead(next, FILE_TEXT, SIG);
@@ -259,18 +265,108 @@ contract CofferTest is Test {
         c.setHead(change(3, 12), "", SIG);
     }
 
+    // ---- writes -----------------------------------------------------------------
+
+    event Written(bytes16 indexed file, address indexed writer, uint64 version);
+
+    bytes32 constant DATA2 = bytes32(uint256(0xd2));
+
+    function wr(uint64 epoch, uint64 version, address writer) internal pure returns (Coffer.Write memory) {
+        return Coffer.Write(V.FILE, epoch, version, V.ACCESS, DATA2, V.NAME, writer);
+    }
+
+    function allowWrite(Coffer.Write memory w, bytes memory key) internal {
+        MockVerify(VERIFY).allow(key, SIG, signed(c.writeText(w)));
+    }
+
+    function test_write_text_matches_vault() public view {
+        Coffer.Write memory w = wr(3, 13, V.OTHER);
+        w.data = V.DATA;
+        assertEq(c.writeText(w), V.WRITE_TEXT);
+    }
+
+    function test_reader_writes_a_new_version_and_it_is_delivered() public {
+        headAt(3); // version 3
+        MockStatus(STATUS).set(V.OTHER, true, 1, hex"0707", true);
+        Coffer.Write memory w = wr(3, 4, V.OTHER);
+        allowWrite(w, hex"0707");
+        vm.expectEmit(true, true, false, true);
+        emit HeadSet(V.FILE, V.ACCOUNT, 3, 4, V.ACCESS, DATA2, V.NAME, FILE_TEXT);
+        vm.expectEmit(true, true, false, true);
+        emit Written(V.FILE, V.OTHER, 4);
+        c.write(w, FILE_TEXT, SIG);
+        (address owner, uint64 epoch, uint64 version,, bytes32 access, bytes32 data) = c.heads(V.FILE);
+        assertEq(owner, V.ACCOUNT);
+        assertEq(epoch, 3);
+        assertEq(version, 4);
+        assertEq(access, V.ACCESS);
+        assertEq(data, DATA2);
+        // the same write again, or an older version, is refused: no rollback
+        vm.expectRevert(abi.encodeWithSelector(Coffer.StaleVersion.selector, uint64(4)));
+        c.write(w, FILE_TEXT, SIG);
+        // opens must now name the new version
+        MockVerify(VERIFY).allow(hex"0707", SIG, signed(c.openText(req(3, 3, V.OTHER, 9))));
+        vm.expectRevert(abi.encodeWithSelector(Coffer.NotLatest.selector, uint64(3), uint64(4)));
+        c.open(req(3, 3, V.OTHER, 9), "", SIG, RELEASE);
+    }
+
+    function test_write_refused_unless_a_current_reader_signs_the_current_access() public {
+        Coffer.Write memory w = wr(3, 4, V.OTHER);
+        vm.expectRevert(Coffer.NoHead.selector);
+        c.write(w, FILE_TEXT, SIG);
+        headAt(3);
+        MockStatus(STATUS).set(V.OTHER, true, 1, hex"0707", true);
+        // not signed by the writer
+        vm.expectRevert(Coffer.BadSignature.selector);
+        c.write(w, FILE_TEXT, SIG);
+        // another epoch, other readers, or an empty file
+        Coffer.Write memory x = wr(2, 4, V.OTHER);
+        vm.expectRevert(abi.encodeWithSelector(Coffer.StaleEpoch.selector, uint64(3)));
+        c.write(x, FILE_TEXT, SIG);
+        x = wr(3, 4, V.OTHER);
+        x.access = bytes32(uint256(1));
+        vm.expectRevert(Coffer.BadAccess.selector);
+        c.write(x, FILE_TEXT, SIG);
+        vm.expectRevert(Coffer.BadFile.selector);
+        c.write(w, "", SIG);
+        // someone never on the list
+        x = wr(3, 4, address(0xD00D));
+        vm.expectRevert(abi.encodeWithSelector(Coffer.NotReader.selector, address(0xD00D)));
+        c.write(x, FILE_TEXT, SIG);
+        // a removed reader, with a valid signature
+        Coffer.Change memory ch = change(4, 4);
+        address[] memory rs = new address[](1);
+        rs[0] = V.ACCOUNT;
+        ch.readers = rs;
+        allowHead(ch);
+        c.setHead(ch, FILE_TEXT, SIG);
+        x = wr(4, 5, V.OTHER);
+        allowWrite(x, hex"0707");
+        vm.expectRevert(abi.encodeWithSelector(Coffer.NotReader.selector, V.OTHER));
+        c.write(x, FILE_TEXT, SIG);
+    }
+
     // ---- opens ------------------------------------------------------------------
 
-    event Opened(bytes16 indexed file, address indexed reader, uint64 epoch, uint64 nonce, bytes32 device, bytes release);
+    event Opened(
+        bytes16 indexed file,
+        address indexed reader,
+        uint64 epoch,
+        uint64 version,
+        uint64 nonce,
+        bytes32 device,
+        bytes32 replyKey,
+        bytes release
+    );
     event DeviceSet(address indexed account, bytes32 indexed device, uint64 untilBlock);
 
     bytes constant RELEASE = hex"0badc0de";
 
-    function req(uint64 epoch, address reader, uint64 nonce) internal pure returns (Coffer.OpenRequest memory) {
-        return Coffer.OpenRequest(V.FILE, epoch, reader, nonce);
+    function req(uint64 epoch, uint64 version, address reader, uint64 nonce) internal pure returns (Coffer.OpenRequest memory) {
+        return Coffer.OpenRequest(V.FILE, epoch, version, reader, V.REPLY_KEY, nonce);
     }
 
-    /// A head at `epoch` whose readers are V.READER_0 and V.READER_1 (V.ACCOUNT and V.OTHER).
+    /// A head at `epoch` (version = epoch) whose readers are V.READER_0 and V.READER_1 (V.ACCOUNT and V.OTHER).
     function headAt(uint64 epoch) internal {
         Coffer.Change memory ch = change(epoch, epoch);
         allowHead(ch);
@@ -279,24 +375,39 @@ contract CofferTest is Test {
 
     function test_open_and_device_texts_match_vault() public {
         headAt(3);
-        assertEq(c.openText(req(3, V.OTHER, 42)), V.OPEN_TEXT);
+        assertEq(c.openText(req(3, 3, V.OTHER, 42)), V.OPEN_TEXT);
         assertEq(c.deviceText(V.OTHER, V.DEVICE_ID, 123456), V.DEVICE_TEXT);
     }
 
     function test_current_reader_opens_with_own_key_and_it_is_logged() public {
         headAt(3);
         MockStatus(STATUS).set(V.OTHER, true, 1, hex"0707", true);
-        MockVerify(VERIFY).allow(hex"0707", SIG, signed(c.openText(req(3, V.OTHER, 42))));
+        MockVerify(VERIFY).allow(hex"0707", SIG, signed(c.openText(req(3, 3, V.OTHER, 42))));
         vm.expectEmit(true, true, false, true);
-        emit Opened(V.FILE, V.OTHER, 3, 42, bytes32(0), RELEASE);
-        c.open(req(3, V.OTHER, 42), "", SIG, RELEASE);
+        emit Opened(V.FILE, V.OTHER, 3, 3, 42, bytes32(0), V.REPLY_KEY, RELEASE);
+        c.open(req(3, 3, V.OTHER, 42), "", SIG, RELEASE);
         Coffer.OpenRecord[] memory log = c.opensOf(V.FILE);
         assertEq(log.length, 1);
         assertEq(log[0].reader, V.OTHER);
         assertEq(log[0].epoch, 3);
+        assertEq(log[0].version, 3);
         // the same request cannot be replayed
         vm.expectRevert(Coffer.UsedNonce.selector);
-        c.open(req(3, V.OTHER, 42), "", SIG, RELEASE);
+        c.open(req(3, 3, V.OTHER, 42), "", SIG, RELEASE);
+    }
+
+    function test_reply_key_is_part_of_the_signed_request() public {
+        headAt(3);
+        MockStatus(STATUS).set(V.OTHER, true, 1, hex"0707", true);
+        MockVerify(VERIFY).allow(hex"0707", SIG, signed(c.openText(req(3, 3, V.OTHER, 42))));
+        // someone who saw the signed request cannot point the release at their own reply key
+        Coffer.OpenRequest memory r = req(3, 3, V.OTHER, 42);
+        r.replyKey = bytes32(uint256(0xbad));
+        vm.expectRevert(Coffer.BadSignature.selector);
+        c.open(r, "", SIG, RELEASE);
+        r.replyKey = bytes32(0);
+        vm.expectRevert(Coffer.BadReplyKey.selector);
+        c.open(r, "", SIG, RELEASE);
     }
 
     function test_removed_reader_cannot_open_any_copy_old_or_new() public {
@@ -310,41 +421,43 @@ contract CofferTest is Test {
         allowHead(ch);
         c.setHead(ch, FILE_TEXT, SIG);
         // the copy of epoch 3 they still hold, with a perfectly valid signature: refused
-        MockVerify(VERIFY).allow(hex"0707", SIG, signed(c.openText(req(3, V.OTHER, 1))));
+        MockVerify(VERIFY).allow(hex"0707", SIG, signed(c.openText(req(3, 3, V.OTHER, 1))));
         vm.expectRevert(abi.encodeWithSelector(Coffer.NotReader.selector, V.OTHER));
-        c.open(req(3, V.OTHER, 1), "", SIG, RELEASE);
+        c.open(req(3, 3, V.OTHER, 1), "", SIG, RELEASE);
         vm.expectRevert(abi.encodeWithSelector(Coffer.NotReader.selector, V.OTHER));
-        c.open(req(4, V.OTHER, 2), "", SIG, RELEASE);
+        c.open(req(4, 4, V.OTHER, 2), "", SIG, RELEASE);
         // someone never on the list: refused
         vm.expectRevert(abi.encodeWithSelector(Coffer.NotReader.selector, address(0xD00D)));
-        c.open(req(4, address(0xD00D), 3), "", SIG, RELEASE);
+        c.open(req(4, 4, address(0xD00D), 3), "", SIG, RELEASE);
         // added back at epoch 5: opens again
         Coffer.Change memory back = change(5, 5);
         allowHead(back);
         c.setHead(back, FILE_TEXT, SIG);
-        MockVerify(VERIFY).allow(hex"0707", SIG, signed(c.openText(req(5, V.OTHER, 4))));
-        c.open(req(5, V.OTHER, 4), "", SIG, RELEASE);
+        MockVerify(VERIFY).allow(hex"0707", SIG, signed(c.openText(req(5, 5, V.OTHER, 4))));
+        c.open(req(5, 5, V.OTHER, 4), "", SIG, RELEASE);
     }
 
     function test_open_needs_the_readers_signature() public {
         headAt(3);
         MockStatus(STATUS).set(V.OTHER, true, 1, hex"0707", true);
         vm.expectRevert(Coffer.BadSignature.selector);
-        c.open(req(3, V.OTHER, 42), "", SIG, RELEASE);
+        c.open(req(3, 3, V.OTHER, 42), "", SIG, RELEASE);
     }
 
-    function test_open_bad_inputs_refused() public {
+    function test_open_only_the_latest_version_and_bad_inputs_refused() public {
         vm.expectRevert(Coffer.NoHead.selector);
-        c.open(req(3, V.OTHER, 1), "", SIG, RELEASE);
+        c.open(req(3, 3, V.OTHER, 1), "", SIG, RELEASE);
         headAt(3);
-        vm.expectRevert(Coffer.BadEpoch.selector);
-        c.open(req(4, V.OTHER, 1), "", SIG, RELEASE);
-        vm.expectRevert(Coffer.BadEpoch.selector);
-        c.open(req(0, V.OTHER, 1), "", SIG, RELEASE);
+        vm.expectRevert(abi.encodeWithSelector(Coffer.NotLatest.selector, uint64(3), uint64(3)));
+        c.open(req(4, 4, V.OTHER, 1), "", SIG, RELEASE);
+        vm.expectRevert(abi.encodeWithSelector(Coffer.NotLatest.selector, uint64(3), uint64(3)));
+        c.open(req(3, 2, V.OTHER, 1), "", SIG, RELEASE);
+        vm.expectRevert(abi.encodeWithSelector(Coffer.NotLatest.selector, uint64(3), uint64(3)));
+        c.open(req(0, 3, V.OTHER, 1), "", SIG, RELEASE);
         vm.expectRevert(Coffer.BadRelease.selector);
-        c.open(req(3, V.OTHER, 1), "", SIG, "");
+        c.open(req(3, 3, V.OTHER, 1), "", SIG, "");
         vm.expectRevert(Coffer.BadDevice.selector);
-        c.open(req(3, V.OTHER, 1), hex"01", SIG, RELEASE);
+        c.open(req(3, 3, V.OTHER, 1), hex"01", SIG, RELEASE);
     }
 
     function test_device_approved_by_the_account_opens_until_it_expires() public {
@@ -355,23 +468,23 @@ contract CofferTest is Test {
         bytes32 id = keccak256(dev);
         uint64 until = uint64(block.number + 100);
         // not approved yet
-        MockVerify(VERIFY).allow(dev, SIG, signed(c.openText(req(3, V.OTHER, 1))));
+        MockVerify(VERIFY).allow(dev, SIG, signed(c.openText(req(3, 3, V.OTHER, 1))));
         vm.expectRevert(Coffer.DeviceNotApproved.selector);
-        c.open(req(3, V.OTHER, 1), dev, SIG, RELEASE);
+        c.open(req(3, 3, V.OTHER, 1), dev, SIG, RELEASE);
         // the account approves it (one wallet signature)
         MockVerify(VERIFY).allow(hex"0707", SIG, signed(c.deviceText(V.OTHER, id, until)));
         vm.expectEmit(true, true, false, true);
         emit DeviceSet(V.OTHER, id, until);
         c.setDevice(V.OTHER, dev, until, SIG);
-        c.open(req(3, V.OTHER, 1), dev, SIG, RELEASE);
+        c.open(req(3, 3, V.OTHER, 1), dev, SIG, RELEASE);
         // a different device signature over another request: refused
         vm.expectRevert(Coffer.BadSignature.selector);
-        c.open(req(3, V.OTHER, 2), dev, SIG, RELEASE);
+        c.open(req(3, 3, V.OTHER, 2), dev, SIG, RELEASE);
         // after it expires
         vm.roll(block.number + 101);
-        MockVerify(VERIFY).allow(dev, SIG, signed(c.openText(req(3, V.OTHER, 3))));
+        MockVerify(VERIFY).allow(dev, SIG, signed(c.openText(req(3, 3, V.OTHER, 3))));
         vm.expectRevert(Coffer.DeviceNotApproved.selector);
-        c.open(req(3, V.OTHER, 3), dev, SIG, RELEASE);
+        c.open(req(3, 3, V.OTHER, 3), dev, SIG, RELEASE);
     }
 
     function test_device_approval_must_be_signed_by_the_account_and_short() public {

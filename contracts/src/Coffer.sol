@@ -12,24 +12,27 @@ pragma solidity ^0.8.28;
 ///    the signature (0x0A01). The newest card per account wins, so a lost
 ///    device's key can be replaced and an old card cannot come back.
 ///
-/// 2. Heads. Each sealed file has one owner and an epoch that only goes up.
-///    The owner signs every change of who can read it; the contract checks
-///    that signature and refuses an older epoch or a different owner. Readers
-///    compare a file against its head, so an old copy (with a removed reader
-///    still in it) or a copy from someone else is refused.
+/// 2. Heads. Each sealed file has one owner, an epoch that only goes up and a
+///    version that only goes up. The owner signs every change of who can read
+///    it; a current reader signs every write of new contents. The contract
+///    checks those signatures and refuses an older epoch or version, a
+///    different owner, or a writer not on the current list. Readers compare a
+///    file against its head, so an old copy or a copy from someone else is refused.
 ///
-/// 3. Opens. A file's contents need two pieces: the reader's own (sealed to
-///    them in the file) and a release piece only the file's keeper can unwrap.
-///    Every open is a request signed by the reader (or by a device key the
-///    reader's wallet approved for a while). The contract refuses it unless the
-///    reader is on the file's current list, then records the open together
-///    with the release piece sealed to that reader. Remove someone, or lose a
-///    laptop, and nothing opens for that address any more, old copies included;
-///    every open that did happen is on chain.
+/// 3. Opens. Each version's contents need two pieces: the reader's own epoch
+///    key (sealed to them in the file) and a release piece made for that
+///    version only, which only the file's keeper can unwrap. To open, the
+///    reader signs a request naming the file's current version and a reply key
+///    made for this one open. The contract refuses it unless the reader is on
+///    the file's current list and the version is the latest, then records the
+///    open together with the release piece sealed to that reply key. The reply
+///    key is thrown away after use, so the public record holds nothing that a
+///    reader's long term key, or a stolen laptop, can open later.
 ///
 /// Access control. Every state change is authorised by an ML-DSA-87 signature,
 /// not by msg.sender: setCard and setDevice need the account's own signature,
-/// setHead the file owner's, open the reader's (or a device the reader approved).
+/// setHead the file owner's, write a current reader's, open the reader's (or a
+/// device the reader approved).
 /// Each is verified on chain by the pqcVerify precompile against the key
 /// QoreChain registered for that account with proof of possession (pqcKeyStatus).
 /// So these functions are deliberately callable by anyone (a relayer pays the
@@ -66,6 +69,17 @@ contract Coffer {
         address[] readers; // every reader, the owner included, in ascending address order
     }
 
+    /// New contents of a file under its current access block, as a current reader signed it.
+    struct Write {
+        bytes16 file;
+        uint64 epoch;
+        uint64 version;
+        bytes32 access;
+        bytes32 data;
+        string name;
+        address writer;
+    }
+
     struct Card {
         bytes32 mlkemSha3; // SHA3-256 of the ML-KEM-1024 public key
         bytes32 x25519; // X25519 public key
@@ -94,19 +108,23 @@ contract Coffer {
     /// Open request nonces already used, per reader.
     mapping(address => mapping(uint64 => bool)) public usedNonce;
 
-    /// One recorded open: who, which epoch of the file, and when.
+    /// One recorded open: who, which epoch and version of the file, and when.
     struct OpenRecord {
         address reader;
         uint64 epoch;
+        uint64 version;
         uint64 blockNumber;
     }
     mapping(bytes16 => OpenRecord[]) internal _opens;
 
     /// One request to open a file, signed by the reader or by one of its approved devices.
+    /// `replyKey` is keccak256 of the ML-KEM-1024 and X25519 public keys made for this open only.
     struct OpenRequest {
         bytes16 file;
         uint64 epoch;
+        uint64 version;
         address reader;
+        bytes32 replyKey;
         uint64 nonce;
     }
 
@@ -125,8 +143,18 @@ contract Coffer {
         bytes sealedFile
     );
     event DeviceSet(address indexed account, bytes32 indexed device, uint64 untilBlock);
-    /// `release` is the file's release piece for that epoch, sealed to the reader (ciphertext).
-    event Opened(bytes16 indexed file, address indexed reader, uint64 epoch, uint64 nonce, bytes32 device, bytes release);
+    /// `release` is that version's release piece, sealed to the one time reply key (ciphertext).
+    event Opened(
+        bytes16 indexed file,
+        address indexed reader,
+        uint64 epoch,
+        uint64 version,
+        uint64 nonce,
+        bytes32 device,
+        bytes32 replyKey,
+        bytes release
+    );
+    event Written(bytes16 indexed file, address indexed writer, uint64 version);
 
     error NoProvenKey(address account);
     error BadSignature();
@@ -146,6 +174,10 @@ contract Coffer {
     error DeviceNotApproved();
     error BadDevice();
     error BadRelease();
+    error StaleVersion(uint64 current);
+    error NotLatest(uint64 epoch, uint64 version);
+    error BadAccess();
+    error BadReplyKey();
 
     constructor(string memory chainId_, string memory site_) {
         chainId = chainId_;
@@ -216,6 +248,7 @@ contract Coffer {
         if (h.owner != address(0)) {
             if (h.owner != c.owner) revert NotOwner(h.owner);
             if (c.epoch <= h.epoch) revert StaleEpoch(h.epoch);
+            if (c.version <= h.version) revert StaleVersion(h.version);
         }
         _verify(c.owner, changeText(c), pqSig);
         heads[c.file] = Head(c.owner, c.epoch, c.version, uint64(block.number), c.access, c.data);
@@ -250,6 +283,49 @@ contract Coffer {
             _name(c.name),
             "\nCan open it: ",
             _readers(c.readers, c.owner),
+            "\nSign this only on ",
+            site,
+            "."
+        );
+    }
+
+    /// Record new contents of a file, written by a reader on its current list
+    /// under the current access block (same epoch, same readers), and deliver
+    /// the sealed file. The version must go up, so an older version cannot come back.
+    /// @dev Access control: the writer's ML-DSA-87 signature over writeText, and memberAt == head epoch.
+    function write(Write calldata w, bytes calldata sealedFile, bytes calldata pqSig) external {
+        if (sealedFile.length == 0 || sealedFile.length > MAX_FILE) revert BadFile();
+        Head memory h = heads[w.file];
+        if (h.owner == address(0)) revert NoHead();
+        if (w.epoch != h.epoch) revert StaleEpoch(h.epoch);
+        if (w.access != h.access) revert BadAccess();
+        if (w.version <= h.version) revert StaleVersion(h.version);
+        if (memberAt[w.file][w.writer] != h.epoch) revert NotReader(w.writer);
+        _verify(w.writer, writeText(w), pqSig);
+        heads[w.file] = Head(h.owner, h.epoch, w.version, uint64(block.number), h.access, w.data);
+        emit HeadSet(w.file, h.owner, h.epoch, w.version, h.access, w.data, w.name, sealedFile);
+        emit Written(w.file, w.writer, w.version);
+    }
+
+    /// The exact text a reader signs to write new contents.
+    function writeText(Write calldata w) public view returns (bytes memory) {
+        return abi.encodePacked(
+            abi.encodePacked(
+                "Coffer write v2\nFile: ",
+                _hex(abi.encodePacked(w.file)),
+                "\nEpoch: ",
+                _dec(w.epoch),
+                "\nVersion: ",
+                _dec(w.version),
+                "\nAccess: ",
+                _hex(abi.encodePacked(w.access)),
+                "\nData: ",
+                _hex(abi.encodePacked(w.data))
+            ),
+            "\nName: ",
+            _name(w.name),
+            "\nWriter: ",
+            bech32(w.writer),
             "\nSign this only on ",
             site,
             "."
@@ -306,31 +382,42 @@ contract Coffer {
         );
     }
 
-    /// Record an open. Refused unless the reader is on the file's current list and
-    /// the request carries the reader's signature, or an approved device's.
-    /// `deviceKey` is empty when the reader's own account key signed.
+    /// Record an open. Refused unless the reader is on the file's current list, the
+    /// request names the file's latest epoch and version, and it carries the
+    /// reader's signature, or an approved device's. `deviceKey` is empty when the
+    /// reader's own account key signed. `release` is that version's release piece
+    /// sealed to the request's one time reply key.
     /// @dev Access control: the reader must be on the file's current list (memberAt) and sign the request
     /// with its own ML-DSA-87 key or an approved device key; each nonce works once.
     function open(OpenRequest calldata r, bytes calldata deviceKey, bytes calldata sig, bytes calldata release) external {
         Head memory h = heads[r.file];
         if (h.owner == address(0)) revert NoHead();
         if (memberAt[r.file][r.reader] != h.epoch) revert NotReader(r.reader);
-        if (r.epoch == 0 || r.epoch > h.epoch) revert BadEpoch();
+        if (r.epoch != h.epoch || r.version != h.version) revert NotLatest(h.epoch, h.version);
+        if (r.replyKey == bytes32(0)) revert BadReplyKey();
         if (usedNonce[r.reader][r.nonce]) revert UsedNonce();
         if (release.length == 0 || release.length > MAX_RELEASE) revert BadRelease();
+        bytes32 device = _openSigner(r, deviceKey, sig);
+        usedNonce[r.reader][r.nonce] = true;
+        _logOpen(r, device, release);
+    }
+
+    /// Check the request's signature: the reader's own key, or a device key it approved and that has not expired.
+    function _openSigner(OpenRequest calldata r, bytes calldata deviceKey, bytes calldata sig) internal view returns (bytes32 device) {
         bytes memory text = openText(r);
-        bytes32 device;
         if (deviceKey.length == 0) {
             _verify(r.reader, text, sig);
-        } else {
-            if (deviceKey.length != ML_DSA_87_PUBLIC_KEY_LENGTH) revert BadDevice();
-            device = keccak256(deviceKey);
-            if (devices[r.reader][device] < block.number) revert DeviceNotApproved();
-            _verifyWith(deviceKey, text, sig);
+            return bytes32(0);
         }
-        usedNonce[r.reader][r.nonce] = true;
-        _opens[r.file].push(OpenRecord(r.reader, r.epoch, uint64(block.number)));
-        emit Opened(r.file, r.reader, r.epoch, r.nonce, device, release);
+        if (deviceKey.length != ML_DSA_87_PUBLIC_KEY_LENGTH) revert BadDevice();
+        device = keccak256(deviceKey);
+        if (devices[r.reader][device] < block.number) revert DeviceNotApproved();
+        _verifyWith(deviceKey, text, sig);
+    }
+
+    function _logOpen(OpenRequest calldata r, bytes32 device, bytes calldata release) internal {
+        _opens[r.file].push(OpenRecord(r.reader, r.epoch, r.version, uint64(block.number)));
+        emit Opened(r.file, r.reader, r.epoch, r.version, r.nonce, device, r.replyKey, release);
     }
 
     /// Every open of a file, oldest first: the access log.
@@ -340,12 +427,18 @@ contract Coffer {
 
     function openText(OpenRequest calldata r) public view returns (bytes memory) {
         return abi.encodePacked(
-            "Coffer open v1\nFile: ",
-            _hex(abi.encodePacked(r.file)),
-            "\nEpoch: ",
-            _dec(r.epoch),
-            "\nReader: ",
-            bech32(r.reader),
+            abi.encodePacked(
+                "Coffer open v2\nFile: ",
+                _hex(abi.encodePacked(r.file)),
+                "\nEpoch: ",
+                _dec(r.epoch),
+                "\nVersion: ",
+                _dec(r.version),
+                "\nReader: ",
+                bech32(r.reader)
+            ),
+            "\nReply key: ",
+            _hex(abi.encodePacked(r.replyKey)),
             "\nNonce: ",
             _dec(r.nonce),
             "\nSign this only on ",

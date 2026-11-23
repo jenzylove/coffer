@@ -12,9 +12,10 @@ import { sha3_256 } from "@noble/hashes/sha3.js";
 import { decodeEventLog, encodeEventTopics, toHex, type Hex } from "viem";
 import {
   createCoffer, shareCoffer, revokeCoffer, openCoffer, verifyCoffer, checkHead, formatCoffer, parseCoffer, localSigner,
-  ownerRelease, canRead, signOpen, newNonce, openReleaseTo, keeperOpenRelease, deviceText, deviceId,
-  CofferError, hex, type CofferFile, type Reader, type Signer,
+  ownerRelease, canRead, signOpen, newNonce, newReplyKeys, openReleaseTo, keeperOpenRelease, deviceText, deviceId,
+  CofferError, hex, type CofferFile, type OpenRequest, type Reader, type Signer,
 } from "../../../src/core/vault.ts";
+import { COFFER_CONTRACT, COFFER_KEEPER } from "../../../src/chain/deployment.ts";
 import { signCard } from "../../../src/core/card.ts";
 import { identityFromMnemonic, newMnemonic, type Identity } from "../../../src/core/identity.ts";
 import { parseDotenv, serializeDotenv } from "../../../src/core/dotenv.ts";
@@ -29,14 +30,20 @@ const CHAIN = "qorechain-diana";
 const NET: Network = { chainId: CHAIN, rest: "/rest" };
 
 let config: Promise<{ net: EvmNetwork; keeper: string | null }> | null = null;
-/** The Coffer contract and the keeper come from the server (GET /api/config). */
+// The contract and keeper this app was built for. The server must name the same ones, so it cannot
+// point the app at a contract of its own choosing.
+const PINNED_CONTRACT = ((import.meta.env.VITE_COFFER_CONTRACT as string | undefined) ?? COFFER_CONTRACT).toLowerCase();
+const PINNED_KEEPER = (import.meta.env.VITE_COFFER_KEEPER as string | undefined) ?? COFFER_KEEPER;
+/** The Coffer contract and the keeper, checked against the ones built into the app (GET /api/config). */
 function serverConfig() {
   if (!config) {
     config = (async () => {
       const r = await fetch("/api/config").catch(() => null);
       const b = r?.ok ? ((await r.json().catch(() => null)) as { contract?: string | null; keeper?: string | null } | null) : null;
       if (!b?.contract) throw new CofferError("NO_CONTRACT", "recording on QoreChain is not set up on this server yet");
-      return { net: { chainId: CHAIN, rest: "/rest", evm: "/evm", coffer: b.contract as Hex }, keeper: b.keeper ?? null };
+      if (b.contract.toLowerCase() !== PINNED_CONTRACT) throw new CofferError("WRONG_CONTRACT", `the server names contract ${b.contract}, but this app was built for ${PINNED_CONTRACT}`);
+      if (b.keeper && b.keeper !== PINNED_KEEPER) throw new CofferError("WRONG_KEEPER", `the server names keeper ${b.keeper}, but this app was built for ${PINNED_KEEPER}`);
+      return { net: { chainId: CHAIN, rest: "/rest", evm: "/evm", coffer: PINNED_CONTRACT as Hex }, keeper: b.keeper ?? null };
     })();
     config.catch(() => { config = null; }); // ask again next time
   }
@@ -58,15 +65,22 @@ function keeperReader(): Promise<Reader> {
   return keeperCache;
 }
 
-/** Send a signed open request; the contract refuses (403) anyone not on the file's current list. */
-async function askToOpen(f: CofferFile, reader: string, keys: SealKeyPair, by: { device: Uint8Array } | { account: Signer }) {
-  const req = { file: f.id, epoch: f.epoch, reader, nonce: newNonce() };
+/**
+ * Send a signed open request naming this version and a reply key made for this one open; the contract
+ * refuses (403) anyone not on the file's current list. The reply key never leaves this function, so the
+ * release QoreChain records can never be opened again, not even with this browser's own keys.
+ */
+async function askToOpen(f: CofferFile, reader: string, by: { device: Uint8Array } | { account: Signer }) {
+  const reply = newReplyKeys();
+  const req: OpenRequest = { file: f.id, epoch: f.epoch, version: f.version, reader, replyKey: reply.id, nonce: newNonce() };
   const device = "device" in by ? pqKeyFromSeed(by.device) : null;
   const sig = await signOpen(CHAIN, req, device ? { device } : { account: (by as { account: Signer }).account });
   const r = await fetch("/api/open", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      file: f.id, epoch: f.epoch.toString(), reader, nonce: req.nonce.toString(), sig: toBase64Url(sig), release: toBase64Url(f.release),
+      file: f.id, epoch: f.epoch.toString(), version: f.version.toString(), reader, replyKey: reply.id, nonce: req.nonce.toString(),
+      replyMlkem: toBase64Url(reply.keys.mlkemPublicKey), replyX25519: toBase64Url(reply.keys.x25519PublicKey),
+      sig: toBase64Url(sig), release: toBase64Url(f.release),
       ...(device ? { deviceKey: toBase64Url(device.publicKey) } : {}),
     }),
   }).catch(() => null);
@@ -74,7 +88,7 @@ async function askToOpen(f: CofferFile, reader: string, keys: SealKeyPair, by: {
   if (!r) throw new CofferError("SERVER_DOWN", "the Coffer server is not reachable right now");
   if (r.status === 403) throw new CofferError("REFUSED_BY_CHAIN", b.error ?? "QoreChain refused to release this file");
   if (!r.ok || !b.sealed) throw new CofferError("NOT_OPENED", b.error ?? `the server answered ${r.status}`);
-  const release = openReleaseTo({ chainId: CHAIN, file: f.id, epoch: f.epoch, reader, nonce: req.nonce, sealed: fromBase64Url(b.sealed), keys });
+  const release = openReleaseTo({ chainId: CHAIN, request: req, sealed: fromBase64Url(b.sealed), replyKeys: reply.keys });
   return { release, hash: b.hash ?? null, block: b.block ?? null };
 }
 
@@ -130,9 +144,9 @@ function canOpen(f: DemoFile) {
   for (const w of ["you", "one", "two"] as Who[]) out[w] = canRead(f, demo!.ids[w].sealKeys) ? "open" : "refused";
   return out;
 }
-/** What a reader on the list reads in the story: the keeper releases this epoch's piece to them. */
+/** What a reader on the list reads in the story: the keeper releases this version's piece to them. */
 function demoOpen(f: DemoFile, who: Identity) {
-  const release = keeperOpenRelease({ chainId: CHAIN, file: f.id, epoch: f.epoch, envelope: f.release, keeperKeys: demo!.keeper.sealKeys });
+  const release = keeperOpenRelease({ chainId: CHAIN, file: f.id, epoch: f.epoch, version: f.version, envelope: f.release, keeperKeys: demo!.keeper.sealKeys });
   return openCoffer(f, who.sealKeys, release);
 }
 const namesOf = (p: Uint8Array) => parseDotenv(dec.decode(p)).map((e) => e.key);
@@ -322,8 +336,11 @@ const ops: Record<string, (a: any, ctx: Ctx) => unknown> = {
       checkHead(f, await readHead(await evm(), f.id));
     }
     if (!canRead(f, keys)) throw new CofferError("NOT_A_READER", "this identity is not a reader of this file");
-    if (f.owner === reader) return { entries: parseDotenv(dec.decode(openCoffer(f, keys, ownerRelease(f, keys)))), hash: null, block: null };
-    const o = await askToOpen(f, reader, keys, by.kind === "device" ? { device: by.seed } : { account: signerFor(by.owner, ctx.opId) });
+    if (f.owner === reader) {
+      try { return { entries: parseDotenv(dec.decode(openCoffer(f, keys, ownerRelease(f, keys)))), hash: null, block: null }; }
+      catch { /* a writer sealed the owner's copy to an older card: ask like any reader */ }
+    }
+    const o = await askToOpen(f, reader, by.kind === "device" ? { device: by.seed } : { account: signerFor(by.owner, ctx.opId) });
     return { entries: parseDotenv(dec.decode(openCoffer(f, keys, o.release))), hash: o.hash, block: o.block };
   },
   /** Is this browser's device key approved for the wallet right now? */
@@ -361,11 +378,11 @@ const ops: Record<string, (a: any, ctx: Ctx) => unknown> = {
       for (const l of logs) {
         try {
           const ev = decodeEventLog({ abi: COFFER_ABI, eventName: "Opened", data: l.data, topics: l.topics as [Hex, ...Hex[]] });
-          hashes.set(`${b}:${qorAddress(ev.args.reader)}:${ev.args.epoch}`, l.transactionHash);
+          hashes.set(`${b}:${qorAddress(ev.args.reader)}:${ev.args.epoch}:${ev.args.version}`, l.transactionHash);
         } catch { /* not an Opened log */ }
       }
     }));
-    return rows.map((r) => ({ ...r, hash: hashes.get(`${r.block}:${r.reader}:${r.epoch}`) ?? null })).reverse();
+    return rows.map((r) => ({ ...r, hash: hashes.get(`${r.block}:${r.reader}:${r.epoch}:${r.version}`) ?? null })).reverse();
   },
 };
 

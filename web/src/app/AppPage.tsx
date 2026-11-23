@@ -911,7 +911,10 @@ function SharedView({ d, go }: { d: Delivered; go: boolean }) {
 
 // ---- one of your files, as the document ---------------------------------------------------
 
-type TeammateAnswer = { opened: true; keys: string[]; epoch: number | string; version: number | string; verified: boolean; hash?: string; block?: number } | { opened: false; code?: string; error: string };
+type LogReplay = { found: number; opened: number };
+type TeammateAnswer =
+  | { opened: true; keys: string[]; epoch: number | string; version: number | string; verified: boolean; hash?: string; block?: number; viaLog?: boolean; logReplay?: LogReplay | null }
+  | { opened: false; code?: string; error: string; logReplay?: LogReplay | null };
 type Outcome = { kind: "ask"; answer: TeammateAnswer; label: "first" | "thief" } | { kind: "revoke"; rotate: string[]; tx: string; block?: number };
 
 const REFUSED: Record<string, string> = {
@@ -1212,7 +1215,7 @@ function OutcomeView({ o }: { o: Outcome }) {
     <div className="outcome answer">
       <p className="label">{what}</p>
       <Stamp>Opened</Stamp>
-      <p>Ada opened it and read {a.keys.length} {a.keys.length === 1 ? "name" : "names"}. The server reports names only, never values.{a.hash ? <> Her open is <a className="link-sm" href={explorerTx(a.hash)} target="_blank" rel="noreferrer">recorded on QoreChain</a>.</> : null}</p>
+      <p>{a.viaLog ? "Her stolen key opened a release from the public log" : "Ada opened it"} and read {a.keys.length} {a.keys.length === 1 ? "name" : "names"}. The server reports names only, never values.{a.hash ? <> Her open is <a className="link-sm" href={explorerTx(a.hash)} target="_blank" rel="noreferrer">recorded on QoreChain</a>.</> : null}</p>
       <Chips names={a.keys} />
       <details className="steps"><summary>Details</summary><p className="mono">epoch {String(a.epoch)} · version {String(a.version)} · checked against QoreChain</p></details>
     </div>
@@ -1221,6 +1224,12 @@ function OutcomeView({ o }: { o: Outcome }) {
       <p className="label">{what}</p>
       <Stamp tone="red">Refused</Stamp>
       <p>{(a.code && REFUSED[a.code]) ?? a.error}</p>
+      {a.logReplay && (
+        <p>
+          The thief also read the public log: {a.logReplay.found} {a.logReplay.found === 1 ? "release" : "releases"} QoreChain recorded for Ada, {a.logReplay.opened} opened with her stolen key.
+          {a.logReplay.found > 0 && a.logReplay.opened === 0 ? " Each one was sealed to a key made for that one open and then thrown away." : ""}
+        </p>
+      )}
       <details className="steps"><summary>Details</summary><p className="mono">{a.code ? `${a.code}: ` : ""}{a.error}</p></details>
     </div>
   );

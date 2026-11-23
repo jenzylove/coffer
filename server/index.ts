@@ -12,13 +12,13 @@ import { fromBase64Url, toBase64Url } from "@qorechain/qoreseal";
 import { identityFromMnemonic } from "../src/core/identity.ts";
 import {
   parseCoffer, verifyCoffer, openCoffer, checkHead, localSigner, canRead, CofferError,
-  keeperOpenRelease, sealReleaseTo, openReleaseTo, signOpen, newNonce,
+  keeperOpenRelease, sealReleaseTo, openReleaseTo, signOpen, newNonce, newReplyKeys, type OpenRequest,
 } from "../src/core/vault.ts";
 import { signCard, readerFromCard, type RecipientCard } from "../src/core/card.ts";
 import { parseDotenv } from "../src/core/dotenv.ts";
 import { scanDotenvx } from "../src/core/dotenvx.ts";
 import { TESTNET, MIN_UQOR, accountStatus, fetchPqKeys, registerIdentity, sendTx, ChainError } from "../src/chain/qore.ts";
-import { cardCall, deviceCall, headCall, openCall, readCard, readHead, fetchReader, type EvmNetwork } from "../src/chain/coffer.ts";
+import { cardCall, deviceCall, headCall, openCall, writeCall, readCard, readHead, readPublicOpens, fetchReader, type EvmNetwork } from "../src/chain/coffer.ts";
 import { Poster, PosterError, POSTER_NET } from "./poster.ts";
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -139,36 +139,70 @@ async function teammateOpen(req: IncomingMessage, res: ServerResponse) {
       checkHead(f, await readHead(evmNet, f.id));
     }
     if (!canRead(f, teammate.sealKeys)) throw new CofferError("NOT_A_READER", "this identity is not a reader of this file");
-    const o = await keeperRelease({ file: f.id, epoch: f.epoch, reader: teammate.address, envelope: f.release, sign: (r) => signOpen(net.chainId, r, { account: localSigner(teammate) }) });
-    const r = openReleaseTo({ chainId: net.chainId, file: f.id, epoch: f.epoch, reader: teammate.address, nonce: o.nonce, sealed: o.sealed, keys: teammate.sealKeys });
-    const keys = parseDotenv(new TextDecoder().decode(openCoffer(f, teammate.sealKeys, r))).map((e) => e.key);
-    send(res, 200, { opened: true, keys, epoch: f.epoch, version: f.version, verified: !thief, hash: o.hash, block: o.block });
+    // A thief also reads the public log: every release QoreChain ever recorded for Ada, tried with Ada's stolen key.
+    const logReplay = thief ? await replayLog(f, teammate.address, teammate.sealKeys) : null;
+    if (logReplay?.plaintext) {
+      const keys = parseDotenv(logReplay.plaintext).map((e) => e.key);
+      return send(res, 200, { opened: true, keys, epoch: f.epoch, version: f.version, verified: false, viaLog: true, logReplay: { found: logReplay.found, opened: logReplay.opened } });
+    }
+    try {
+      const reply = newReplyKeys();
+      const request: OpenRequest = { file: f.id, epoch: f.epoch, version: f.version, reader: teammate.address, replyKey: reply.id, nonce: newNonce() };
+      const sig = await signOpen(net.chainId, request, { account: localSigner(teammate) });
+      const o = await keeperRelease({ request, reply: reply.keys, envelope: f.release, sig });
+      const r = openReleaseTo({ chainId: net.chainId, request, sealed: o.sealed, replyKeys: reply.keys });
+      const keys = parseDotenv(new TextDecoder().decode(openCoffer(f, teammate.sealKeys, r))).map((e) => e.key);
+      send(res, 200, { opened: true, keys, epoch: f.epoch, version: f.version, verified: !thief, hash: o.hash, block: o.block, logReplay });
+    } catch (e) {
+      if (logReplay && (e instanceof CofferError || e instanceof PosterError)) (e as Error & { logReplay?: unknown }).logReplay = logReplay;
+      throw e;
+    }
   } catch (e) {
     release();
-    if (e instanceof CofferError || e instanceof ChainError) return send(res, 200, { opened: false, code: e.code, error: e.message });
-    if (e instanceof PosterError) return send(res, 200, { opened: false, code: e.message.includes("not on this file's list") ? "REFUSED_BY_CHAIN" : "NOT_RECORDED", error: e.message });
+    const logReplay = (e as { logReplay?: { found: number; opened: number } }).logReplay;
+    const lr = logReplay ? { logReplay: { found: logReplay.found, opened: logReplay.opened } } : {};
+    if (e instanceof CofferError || e instanceof ChainError) return send(res, 200, { opened: false, code: e.code, error: e.message, ...lr });
+    if (e instanceof PosterError) return send(res, 200, { opened: false, code: /not on this file's list|not the latest version/.test(e.message) ? "REFUSED_BY_CHAIN" : "NOT_RECORDED", error: e.message, ...lr });
     throw e;
   }
 }
 
 /**
- * The keeper's one job: unwrap a release piece bound to this file and epoch, seal it to the reader,
- * and hand it over only through the contract, which refuses anyone not on the file's current list.
+ * What a thief with a reader's key file can do without asking anyone: read every Opened event
+ * QoreChain recorded for that reader and this file, and try to unwrap each release with the
+ * stolen key. Each one is sealed to a reply key that existed for one open only.
+ */
+async function replayLog(f: ReturnType<typeof parseCoffer>, reader: string, stolen: typeof teammate.sealKeys) {
+  const events = await readPublicOpens(evmNet, f.id, reader);
+  let opened = 0;
+  let plaintext: string | null = null;
+  for (const ev of events) {
+    const request: OpenRequest = { file: f.id, epoch: ev.epoch, version: ev.version, reader, replyKey: ev.replyKey, nonce: ev.nonce };
+    try {
+      const piece = openReleaseTo({ chainId: net.chainId, request, sealed: ev.release, replyKeys: stolen });
+      opened++;
+      if (ev.epoch === f.epoch && ev.version === f.version) plaintext = new TextDecoder().decode(openCoffer(f, stolen, piece));
+    } catch { /* sealed to a reply key that no longer exists */ }
+  }
+  return { found: events.length, opened, plaintext };
+}
+
+/**
+ * The keeper's one job: unwrap the release piece of the version a signed request names, seal it to
+ * the request's one time reply key, and hand it over only through the contract, which refuses anyone
+ * not on the file's current list and any version but the latest. The poster simulates the call first,
+ * so a refused request never leaves this server.
  */
 async function keeperRelease(a: {
-  file: string; epoch: bigint; reader: string; envelope: Uint8Array; nonce?: bigint; deviceKey?: Uint8Array; sig?: Uint8Array;
-  sign?: (r: { file: string; epoch: bigint; reader: string; nonce: bigint }) => Promise<Uint8Array>;
+  request: OpenRequest; reply: { mlkemPublicKey: Uint8Array; x25519PublicKey: Uint8Array }; envelope: Uint8Array; deviceKey?: Uint8Array; sig: Uint8Array;
 }) {
   if (!keeper || !poster || !CONTRACT) throw new HttpError(503, "opening through QoreChain is not set up on this server");
-  const nonce = a.nonce ?? newNonce();
-  const reqd = { file: a.file, epoch: a.epoch, reader: a.reader, nonce };
-  const sig = a.sig ?? (await a.sign!(reqd));
-  const r = keeperOpenRelease({ chainId: net.chainId, file: a.file, epoch: a.epoch, envelope: a.envelope, keeperKeys: keeper.sealKeys });
-  const reader = await fetchReader(evmNet, a.reader);
-  const sealed = sealReleaseTo({ chainId: net.chainId, file: a.file, epoch: a.epoch, reader, nonce, release: r });
-  const c = openCall(reqd, a.deviceKey ?? new Uint8Array(), sig, sealed);
+  const { request } = a;
+  const r = keeperOpenRelease({ chainId: net.chainId, file: request.file, epoch: request.epoch, version: request.version, envelope: a.envelope, keeperKeys: keeper.sealKeys });
+  const sealed = sealReleaseTo({ chainId: net.chainId, request, reply: a.reply, release: r });
+  const c = openCall(request, a.deviceKey ?? new Uint8Array(), a.sig, sealed);
   const t = await poster.call(c.functionName, c.args);
-  return { ...t, sealed, nonce };
+  return { ...t, sealed };
 }
 
 const b64 = (s: unknown, what: string) => {
@@ -176,18 +210,23 @@ const b64 = (s: unknown, what: string) => {
   try { return fromBase64Url(s); } catch { throw new HttpError(400, `${what} must be base64url`); }
 };
 
-/** A reader asks to open: their signed request goes to the contract with the release piece sealed to them. */
+/** A reader asks to open: their signed request goes to the contract with the release piece sealed to their reply key. */
 async function postOpen(req: IncomingMessage, res: ServerResponse) {
   const body = await readBody(req, 64 * 1024);
-  const { file, epoch, reader, nonce } = body ?? {};
-  if (typeof file !== "string" || !/^[0-9a-f]{32}$/.test(file) || typeof reader !== "string" || !/^\d+$/.test(String(epoch)) || !/^\d+$/.test(String(nonce))) {
-    throw new HttpError(400, "send { file, epoch, reader, nonce, sig, release, deviceKey? }");
+  const { file, epoch, version, reader, replyKey, nonce } = body ?? {};
+  const num = (v: unknown) => /^\d+$/.test(String(v));
+  if (typeof file !== "string" || !/^[0-9a-f]{32}$/.test(file) || typeof reader !== "string" || !num(epoch) || !num(version) || !num(nonce)
+    || typeof replyKey !== "string" || !/^[0-9a-f]{64}$/.test(replyKey)) {
+    throw new HttpError(400, "send { file, epoch, version, reader, replyKey, replyMlkem, replyX25519, nonce, sig, release, deviceKey? }");
   }
+  const reply = { mlkemPublicKey: b64(body.replyMlkem, "replyMlkem"), x25519PublicKey: b64(body.replyX25519, "replyX25519") };
+  if (reply.mlkemPublicKey.length !== 1568 || reply.x25519PublicKey.length !== 32) throw new HttpError(400, "the reply key has the wrong length");
   const release = postSlot(req, "open", `${reader}:${file}`);
   try {
     if (!(await posterHasFunds())) throw new HttpError(503, "the Coffer server is low on test QOR for recording; the owner tops it up from the faucet. Try again later.");
+    const request: OpenRequest = { file, epoch: BigInt(epoch), version: BigInt(version), reader, replyKey, nonce: BigInt(nonce) };
     const o = await keeperRelease({
-      file, epoch: BigInt(epoch), reader, nonce: BigInt(nonce), envelope: b64(body.release, "release"),
+      request, reply, envelope: b64(body.release, "release"),
       sig: b64(body.sig, "sig"), deviceKey: body.deviceKey ? b64(body.deviceKey, "deviceKey") : undefined,
     });
     send(res, 200, { hash: o.hash, block: o.block, sealed: toBase64Url(o.sealed) });
@@ -285,6 +324,33 @@ async function postHead(req: IncomingMessage, res: ServerResponse) {
     if (!(await posterHasFunds())) throw new HttpError(503, "the Coffer server is low on test QOR for recording; the owner tops it up from the faucet. Try again later.");
     const h = headCall(f);
     const t = await poster!.call(h.functionName, h.args);
+    send(res, 200, { hash: t.hash, block: t.block, contract: CONTRACT });
+  } catch (e) {
+    release();
+    if (e instanceof PosterError) throw new HttpError(e.status, e.message);
+    throw e;
+  }
+}
+
+/** Record a reader's signed write of new values. Checked here first, then again by the contract on chain. */
+async function postWrite(req: IncomingMessage, res: ServerResponse) {
+  const { file } = await readBody(req);
+  if (typeof file !== "string") throw new HttpError(400, "send { file: <.env.coffer text> }");
+  let f;
+  try {
+    f = parseCoffer(file);
+    if (f.chainId !== net.chainId) throw new CofferError("WRONG_CHAIN", `this file is for ${f.chainId}`);
+    if (!f.write) throw new CofferError("NOTHING_TO_DO", "this file has no write to record");
+    verifyCoffer(f, await fetchPqKeys(net, [f.owner, f.writer]));
+  } catch (e) {
+    if (e instanceof CofferError) throw new HttpError(400, e.message);
+    throw e;
+  }
+  const release = postSlot(req, "head", f.id);
+  try {
+    if (!(await posterHasFunds())) throw new HttpError(503, "the Coffer server is low on test QOR for recording; the owner tops it up from the faucet. Try again later.");
+    const w = writeCall(f);
+    const t = await poster!.call(w.functionName, w.args);
     send(res, 200, { hash: t.hash, block: t.block, contract: CONTRACT });
   } catch (e) {
     release();
@@ -414,6 +480,7 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/api/teammate" && req.method === "GET") return send(res, 200, { address: teammate.address });
     if (url.pathname === "/api/card" && req.method === "POST") return await postCard(req, res);
     if (url.pathname === "/api/head" && req.method === "POST") return await postHead(req, res);
+    if (url.pathname === "/api/write" && req.method === "POST") return await postWrite(req, res);
     if (url.pathname === "/api/config" && req.method === "GET") return send(res, 200, { chainId: net.chainId, contract: CONTRACT ?? null, poster: poster?.address ?? null, teammate: teammate.address, keeper: keeper?.address ?? null });
     if (url.pathname === "/api/open" && req.method === "POST") return await postOpen(req, res);
     if (url.pathname === "/api/device" && req.method === "POST") return await postDevice(req, res);
