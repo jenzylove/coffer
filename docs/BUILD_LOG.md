@@ -51,7 +51,7 @@ Fixed on the way: file ids are now random and signed (an id derived from owner a
 
 **Web.** Connect QoreX or use this browser (no recovery phrase shown); share by wallet address; Shared with you read from the chain; invites tied to the invited address; the owner sees "ready, add them" when an invitee signs. The browser journey passed on the live site (16 of 16 and 8 of 8 checks).
 
-**Costs, measured:** a card about 589,500 gas (about 0.06 QOR); a change with one reader 759,521 to 1,126,453 gas (0.08 to 0.11 QOR) at 101 gwei, paid by the Coffer server.
+**Costs, measured:** a card about 589,500 gas (about 0.06 QOR); a change with one reader 759,521 to 1,126,453 gas (0.08 to 0.11 QOR) at 101 gwei, paid by the Coffer server. (Superseded by the measurements in the entries below.)
 
 ## 22 Nov 2026, evening: every open is a request the chain answers
 

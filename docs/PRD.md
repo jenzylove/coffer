@@ -4,16 +4,17 @@ Build Before Q-Day, the QoreChain Developer Fest. Category: **Encrypted Apps** (
 
 Deadline: **2 December 2026, 23:59 UTC.** Checks 3 to 5 Dec, jury 6 to 15 Dec, winners 16 Dec. Testnet only (`qorechain-diana`); mainnet is not required.
 
-## Current design (22 Nov 2026)
+## Current design (23 Nov 2026)
 
-This PRD was written on 17 Nov, before the build. Two decisions in it changed once the app met real wallets; the rest stands.
+This PRD was written on 17 Nov, before the build. Three decisions in it changed once the app met real wallets and outside judges; the rest stands.
 
 | 17 Nov plan | What shipped, and why |
 |---|---|
 | Teammates are found through the chain's KEM registry; "no EVM reader registry" | QoreX refuses to publish an encryption key for websites, so a QoreX user could never be sealed to. Every account now signs a QoreSeal recipient card (QoreX `signArbitrary`), and the **Coffer contract** checks it with the `pqcVerify` / `pqcKeyStatus` precompiles before recording it. Browser and CLI accounts still publish in the KEM registry too. |
-| Grants recorded as native memo transactions; the client scans them | Each change is one owner signature that the contract checks (`setHead`): it binds the file to its owner, refuses an older epoch, carries the sealed file itself, and lists the file under every reader's address, so sharing also delivers it. |
+| Grants recorded as native memo transactions; the client scans them | Each change is one owner signature that the contract checks (`setHead`): it binds the file to its owner, refuses an older epoch, carries the sealed file itself, and lists the file under every reader's address, so sharing also delivers it. Readers' writes of new values are recorded the same way (`write`). |
+| Removal stops the next epoch only; a removed reader keeps every copy they hold | Every open is a request the contract answers (`open`): a version's contents need a release piece that the keeper hands out only through the contract, which checks the file's current list and records the open. Each release is sealed to a reply key made for that one open, and each version has its own piece, so neither a removed reader nor a laptop thief can open a copy, even from the public record (`THREAT_MODEL.md`). |
 
-The contract is `contracts/src/Coffer.sol`, deployed at `0x598d87f328739a6155486b41e4d191ff9e7f7d24` on `qorechain-diana`. The log of what was built and run on testnet is `docs/BUILD_LOG.md`.
+The contract is `contracts/src/Coffer.sol`, deployed at `0x1ee9f98e8784f150d54a7ceea97026d4320746db` on `qorechain-diana`. The log of what was built and run on testnet is `docs/BUILD_LOG.md`.
 
 ## One line
 

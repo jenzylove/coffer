@@ -302,6 +302,11 @@ details.ada > *:not(summary) { margin-top: 16px; }
 .who-opened + .file-raw { margin-top: 8px; }
 .actions.actions-tight { margin-top: 18px; }
 .doc-copy { margin-left: 14px; }
+/* a long name or value shrinks its bar; the Copy button always stays in view */
+.doc-line { display: flex; align-items: baseline; }
+.doc-line .env-k, .doc-line .doc-copy { flex: none; }
+.doc-line .reveal-bar { flex: 0 1 auto; min-width: 2ch; overflow: hidden; text-align: left; }
+.doc-line .reveal-bar .mono { white-space: normal; word-break: break-all; }
 .files { display: grid; }
 .file-row { display: grid; gap: 2px; text-align: left; padding: 14px 0; border-bottom: 1px solid var(--rule); color: var(--body); }
 .files > .label + .file-row, .files > .label + p + .file-row { border-top: 1px solid var(--rule); }
