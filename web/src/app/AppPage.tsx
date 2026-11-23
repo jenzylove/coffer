@@ -1165,7 +1165,7 @@ function FileDetail({ stored, ready, onChange }: { stored: Stored; ready: Record
   );
 }
 
-type OpenRow = { reader: string; epoch: bigint; block: number; hash: string | null };
+type OpenRow = { reader: string; epoch: bigint; version: bigint; block: number; hash: string | null };
 
 /** The access log: every open of this file QoreChain recorded, newest first. Read when it is unfolded. */
 function WhoOpened({ fileId, epoch, tick, name }: { fileId: string; epoch: bigint; tick: number; name: (a: string) => string }) {
@@ -1187,7 +1187,7 @@ function WhoOpened({ fileId, epoch, tick, name }: { fileId: string; epoch: bigin
           {rows.map((r, i) => (
             <li key={`${r.block}:${r.reader}:${i}`}>
               <span>{name(r.reader)}</span>
-              <span className="mono">epoch {String(r.epoch)}</span>
+              <span className="mono">version {String(r.version)}</span>
               <span className="mono">block {r.block}</span>
               {r.hash ? <TxLink hash={r.hash} label="view" /> : <span />}
             </li>

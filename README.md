@@ -101,17 +101,20 @@ npx github:jenzylove/coffer pull <id>            # save the latest copy of a sha
 
 The CLI keeps its key in `~/.coffer/identity`. On a server or in CI, set `COFFER_IDENTITY` instead.
 
-A run on the live site, 22 Nov 2026: two people on the CLI, nothing copied between them.
+A run on the live site, 23 Nov 2026: two people on the CLI, nothing copied between them.
 
 | Step | Result |
 |---|---|
-| Contract deployed | `0xf2259a010acd90b6cde731a655a8c406896fe831e2a33793f8adb2ab2f679e1d` |
-| The keeper's card | `0xf82aac2cf76d1148babbd1e35c7fc1357481a702688226d3a7263feaba3f257d` |
-| Owner seals a .env to the teammate (epoch 1); the sealed file goes on chain with it | `0x281deab4388ab5ca090c64a0dfc96e5b236282040b47ccfac4a851bcf34e6655` |
-| Teammate: `coffer inbox`, `coffer pull`, `coffer run`; QoreChain checks they are on the list, records the open and releases the second key piece | `0x36ff8751db6d0cfc0bc918c0b378124c079983e3f10b614a104addd91025bb0a` |
-| Owner removes the teammate (epoch 2) | `0x09d615f31929f4b8869caeb564acd4d4c216b0f2d00713ce951c322058cb06ab` |
-| **A stolen laptop:** the teammate's old copy, their key, and `--offline` (no checks of Coffer's own) | refused by QoreChain: "not on this file's list any more" |
-| Owner's `coffer status` | the access log: one open, by that teammate, at epoch 1 |
+| Contract deployed | `0x45a6fc46f4e812c56d7051d99fc87c25dfee2adce4ccbc0093ce339134bf4c9d` |
+| The keeper's card | `0xacb0967305fa347e1262470ac85bb277b1a2a62f1f69bf38e94dc1df0c782603` |
+| Owner seals a .env to the teammate (epoch 1, version 1); the sealed file goes on chain with it | `0x71911eecb6f1e352c23044513110bce0946b9ef401c72bacad933e072a2696dc` |
+| Teammate: `coffer inbox`, `coffer pull`, `coffer run`; QoreChain checks they are on the list, records the open and releases the second piece sealed to a one time reply key | `0x6afb5b613f97acb379bd755b3738ae302bbc35f7312d9a3f5c6770f3c9f3bebb` |
+| Owner: `coffer set STRIPE_KEY` (version 2, recorded) | `0x0c7b6f08a828a01ebc1ce75c8f945d15195b47a0487c4e127ebddb18f6042e6c` |
+| Teammate pulls and opens version 2 (a new request) | `0xd4e7c2f4ddabc6adc3a7ace8b686d6d5e33c70021c540fb42333d0f42e0e042a` |
+| Owner removes the teammate (epoch 2) | `0x1bc1c7d20e18360ee6d75c659ceed833c16d03ae745360242b5319563a53a3b1` |
+| **A stolen laptop asks QoreChain:** the teammate's old copy, their key, and `--offline` (no checks of Coffer's own) | refused by QoreChain: "not on this file's list any more" |
+| **A stolen laptop skips Coffer:** `scripts/log-replay.mts` tries every open on the public record with the stolen key | 2 releases found, none opens |
+| Owner's `coffer status` | the access log: two opens by that teammate, versions 1 and 2 |
 
 Open any hash on the [dashboard explorer](https://dashboard.qorechain.io/explorer) with the network set to Testnet.
 

@@ -73,3 +73,31 @@ Fixed on the way: file ids are now random and signed (an id derived from owner a
 
 **Costs:** an open 425,463 gas (about 0.04 QOR); a change 830,095 to 1,200,320 gas (0.08 to 0.12 QOR); paid by the Coffer server.
 
+## 23 Nov 2026: an outside judge broke the stolen laptop claim; contract v5 closes it
+
+**What broke.** A fresh judge agent (no build context) read the public `Opened` events of contract v4 and unwrapped a removed reader's release piece with that reader's own card key, then opened the old copy with no request (`thief.mts`, run on testnet against `0xeafe…a3fe`). The piece was sealed to the reader's long term key and reused for every version in an epoch, so it also opened versions the reader had never asked for. Our own runs had only tried the path through the keeper.
+
+**The fix (contract v5 `0x1ee9f98e8784f150d54a7ceea97026d4320746db`, deploy tx `0x45a6fc46f4e812c56d7051d99fc87c25dfee2adce4ccbc0093ce339134bf4c9d`, format 4).**
+- Every open request names the latest version and a reply key (ML-KEM-1024 + X25519) the reader makes for that one open; the keeper seals the piece to it, and the reader drops it. The reply key's hash is inside the signed request, so nobody can point a release at a key of their own.
+- Every version has its own release piece (with an owner copy), and `open` refuses anything but the latest version.
+- Readers' writes are recorded on chain (`write`): delivery stays current and an older version is refused.
+- The web app is built for one contract and one keeper and refuses a server that names others.
+- 29 Foundry tests, 48 unit tests; the judge's attack is a unit test and [`scripts/log-replay.mts`](../scripts/log-replay.mts). Deployed runtime code matches the source (compared with `eth_getCode`, metadata aside).
+
+**On the live site, two people on the CLI:**
+
+| Step | Result | Tx |
+|---|---|---|
+| Owner seals to the teammate (epoch 1, version 1) | recorded | `0x71911eecb6f1e352c23044513110bce0946b9ef401c72bacad933e072a2696dc` |
+| Teammate opens (inbox, pull, run) | list and version checked, open recorded, piece sealed to a reply key | `0x6afb5b613f97acb379bd755b3738ae302bbc35f7312d9a3f5c6770f3c9f3bebb` |
+| Owner writes version 2 | recorded | `0x0c7b6f08a828a01ebc1ce75c8f945d15195b47a0487c4e127ebddb18f6042e6c` |
+| Teammate opens version 2 | a new request, recorded | `0xd4e7c2f4ddabc6adc3a7ace8b686d6d5e33c70021c540fb42333d0f42e0e042a` |
+| Owner removes the teammate (epoch 2) | recorded | `0x1bc1c7d20e18360ee6d75c659ceed833c16d03ae745360242b5319563a53a3b1` |
+| Stolen laptop asks QoreChain (`--offline`) | refused by the contract (NotReader) | |
+| Stolen laptop reads the public record (`log-replay.mts`) | 2 releases, 0 open | |
+| `coffer status` | access log: two opens, versions 1 and 2 | |
+
+Also found by this run and fixed: removing a reader right after a write failed, because the write carried into the owner's change.
+
+**Costs at 101 gwei:** card about 590,000 gas; change or write 883,589 to 1,221,551 gas (0.09 to 0.12 QOR); open 434,778 to 451,854 gas (about 0.045 QOR); paid by the Coffer server.
+
