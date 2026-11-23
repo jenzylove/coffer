@@ -40,3 +40,15 @@ The values in a `.env` file (API keys, passwords, database URLs). The file names
 - **Keys in the browser** sit in `localStorage`. "Save my key file" moves them; a passkey wrap is not built.
 - **Metadata is public:** who can open a file, when it changed, and every open.
 - **Size:** a sealed file holds about 9 people (64 KB on chain); a larger team splits files.
+
+## QCAI audit (QoreChain AI, 23 Nov 2026)
+
+Report: [docs/audit/qcai-2026-11-23.pdf](docs/audit/qcai-2026-11-23.pdf). Score 78 of 100, risk medium, 5 findings. The auditor read the chain as "ethereum", so it did not score post-quantum readiness. Our answer to each finding, checked against the code and the tests:
+
+| Finding | Severity | Answer |
+|---|---|---|
+| Missing access control on setCard, setHead, setDevice | High | By design: anyone may submit, and the access control is the ML-DSA-87 signature each function verifies with `pqcVerify` against the account's proven key. A call without it reverts: `test_card_with_wrong_signature_refused`, `test_head_of_someone_elses_file_refused`, `test_device_approval_must_be_signed_by_the_account_and_short`, `test_open_needs_the_readers_signature`. The contract now says so on each function (comments only; the deployed runtime code is unchanged). |
+| Overflow in the device duration check | Medium | Not possible: Solidity 0.8 checks arithmetic, and `block.number + 200_000` is far from the uint256 limit. |
+| Front-running of file changes | Medium | Submitting an owner's signed change first records exactly that change. A related nuisance is real: someone holding a reader's signed open request could submit it first with a junk release piece, using up that nonce; the reader's Coffer simply retries with a new one. It gains the attacker nothing and costs them gas. |
+| Unbounded loop over readers | Low | Bounded: at most 64 readers (`MAX_READERS`), and about 9 in practice because a sealed file is capped at 64 KB. |
+| No ERC interface | Info | Correct: Coffer is not a token. |

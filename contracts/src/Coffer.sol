@@ -27,7 +27,16 @@ pragma solidity ^0.8.28;
 ///    laptop, and nothing opens for that address any more, old copies included;
 ///    every open that did happen is on chain.
 ///
-/// Nothing here trusts msg.sender: anyone may submit, only signatures count.
+/// Access control. Every state change is authorised by an ML-DSA-87 signature,
+/// not by msg.sender: setCard and setDevice need the account's own signature,
+/// setHead the file owner's, open the reader's (or a device the reader approved).
+/// Each is verified on chain by the pqcVerify precompile against the key
+/// QoreChain registered for that account with proof of possession (pqcKeyStatus).
+/// So these functions are deliberately callable by anyone (a relayer pays the
+/// gas), and a call without the right signature reverts with BadSignature,
+/// NoProvenKey, NotOwner or NotReader. Submitting someone else's signed message
+/// first only records exactly what they signed, so front-running gains nothing.
+/// Arithmetic is checked (Solidity 0.8) and every loop is bounded (64 readers).
 contract Coffer {
     address internal constant VERIFY = 0x0000000000000000000000000000000000000a01;
     address internal constant STATUS = 0x0000000000000000000000000000000000000a02;
@@ -154,6 +163,7 @@ contract Coffer {
     /// part of the account's QoreSign message signature over the card text;
     /// `card` is the full card JSON (both signatures) for readers who check it
     /// again off chain.
+    /// @dev Access control: the account's ML-DSA-87 signature over the card text (see the contract notice).
     function setCard(
         address account,
         bytes32 mlkemSha3,
@@ -198,6 +208,7 @@ contract Coffer {
     /// owner; every later one must come from the same owner with a higher epoch.
     /// The reader list is part of the signed text, so the list each reader finds
     /// the file under is exactly the one the owner approved.
+    /// @dev Access control: the owner's ML-DSA-87 signature over changeText; the first head binds the owner.
     function setHead(Change calldata c, bytes calldata sealedFile, bytes calldata pqSig) external {
         if (sealedFile.length == 0 || sealedFile.length > MAX_FILE) revert BadFile();
         if (c.epoch == 0) revert BadEpoch();
@@ -270,6 +281,8 @@ contract Coffer {
     /// Approve a device key (made and kept in one browser or machine) to sign open
     /// requests for `account` until `untilBlock`. Signed once by the account's own
     /// ML-DSA-87 key (one QoreX approval). An `untilBlock` in the past revokes it.
+    /// @dev Access control: the account's ML-DSA-87 signature over deviceText. untilBlock is capped at
+    /// block.number + 200,000 (checked arithmetic, no overflow possible).
     function setDevice(address account, bytes calldata deviceKey, uint64 untilBlock, bytes calldata pqSig) external {
         if (deviceKey.length != ML_DSA_87_PUBLIC_KEY_LENGTH) revert BadDevice();
         if (untilBlock > block.number + MAX_DEVICE_BLOCKS) revert BadDevice();
@@ -296,6 +309,8 @@ contract Coffer {
     /// Record an open. Refused unless the reader is on the file's current list and
     /// the request carries the reader's signature, or an approved device's.
     /// `deviceKey` is empty when the reader's own account key signed.
+    /// @dev Access control: the reader must be on the file's current list (memberAt) and sign the request
+    /// with its own ML-DSA-87 key or an approved device key; each nonce works once.
     function open(OpenRequest calldata r, bytes calldata deviceKey, bytes calldata sig, bytes calldata release) external {
         Head memory h = heads[r.file];
         if (h.owner == address(0)) revert NoHead();
