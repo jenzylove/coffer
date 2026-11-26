@@ -49,9 +49,9 @@ The values in a `.env` file (API keys, passwords, database URLs). The file names
 - **Metadata is public:** who can open a file, when it changed, and every reader's open.
 - **Size:** a sealed file holds about 9 people (64 KB on chain); a larger team splits files.
 
-## QCAI audit (QoreChain AI, 23 Nov 2026)
+## QCAI audit (QoreChain AI)
 
-Report: [docs/audit/qcai-2026-11-23.pdf](docs/audit/qcai-2026-11-23.pdf), on contract v4. Score 78 of 100, risk medium, 5 findings. The auditor read the chain as "ethereum", so it did not score post-quantum readiness. Our answer to each finding, checked against the code and the tests (v5 keeps every answer):
+Reports: [docs/audit/qcai-2026-11-26-v5.pdf](docs/audit/qcai-2026-11-26-v5.pdf) on contract v5 (26 Nov 2026) and [docs/audit/qcai-2026-11-23.pdf](docs/audit/qcai-2026-11-23.pdf) on v4. Both score 78 of 100, risk medium, 5 findings. The v5 run flags setDevice for not checking the device key length: it does, as its first line (`deviceKey.length != ML_DSA_87_PUBLIC_KEY_LENGTH` reverts `BadDevice`, `test_device_approval_must_be_signed_by_the_account_and_short`). The auditor read the chain as "ethereum", so it did not score post-quantum readiness. Our answer to each finding, checked against the code and the tests (v5 keeps every answer):
 
 | Finding | Severity | Answer |
 |---|---|---|
