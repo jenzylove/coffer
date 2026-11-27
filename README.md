@@ -160,6 +160,7 @@ On 17 Nov 2026 GitHub code search returned **2,284** public files containing `DO
 - [CosmJS](https://github.com/cosmos/cosmjs) and `cosmjs-types`: transaction encoding
 - [noble](https://paulmillr.com/noble/) (`@noble/hashes`, `@noble/curves`) and [scure](https://github.com/paulmillr/scure-bip39) (`@scure/bip39`): hashing, secp256k1, mnemonics
 - [eciesjs](https://github.com/ecies/js) and [dotenvx](https://dotenvx.com): reading dotenvx files for import (dotenvx is used in tests to make real fixtures)
+- `@qorechain/qorex-types` (QoreX integrations): finding the QoreX wallet in the page
 - [React](https://react.dev) and [Vite](https://vitejs.dev): the web app
 - [Mona Sans](https://github.com/github/mona-sans) and [Fragment Mono](https://github.com/weiweihuanghuang/fragment-mono) through Fontsource: the type
 
