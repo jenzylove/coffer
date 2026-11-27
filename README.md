@@ -28,6 +28,7 @@
 | Live site | https://coffer.jdollar.site |
 | The app (QoreX, or no wallet at all) | https://coffer.jdollar.site/app |
 | The Coffer contract (testnet) | `0x1ee9f98e8784f150d54a7ceea97026d4320746db` on `qorechain-diana` ([deploy tx](https://dashboard.qorechain.io/explorer/tx/0x45a6fc46f4e812c56d7051d99fc87c25dfee2adce4ccbc0093ce339134bf4c9d), [source](contracts/src/Coffer.sol)) |
+| Demo video (2:50) | https://youtu.be/1B-3EafeYU4 |
 | Proof of the testnet runs | https://coffer.jdollar.site/proof and [docs/BUILD_LOG.md](docs/BUILD_LOG.md) |
 | Product spec | [docs/PRD.md](docs/PRD.md) |
 
