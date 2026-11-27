@@ -10,6 +10,7 @@
 // Either way "Save my key file" keeps a private copy, and "Load my key file"
 // brings it back.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { getQorexNative } from "@qorechain/qorex-types";
 import type { SealKeyPair } from "@qorechain/qoreseal";
 import type { MessageSignature } from "@qorechain/qoresign";
 import type { Identity } from "../../../src/core/identity.ts";
@@ -35,7 +36,8 @@ interface QorexNative {
   getKey(chainId: string): Promise<{ bech32Address: string }>;
   signArbitrary(chainId: string, signer: string, data: string): Promise<MessageSignature>;
 }
-const qorex = (): QorexNative | null => ((window as unknown as { qorex?: { native?: QorexNative } }).qorex?.native ?? null);
+/** QoreX's native provider, found with the official helper from @qorechain/qorex-types. */
+const qorex = (): QorexNative | null => (getQorexNative() as unknown as QorexNative | undefined) ?? null;
 /** Extensions can inject a moment after the page starts: look for a little while. */
 async function findQorex(ms: number): Promise<QorexNative | null> {
   for (let t = 0; t < ms; t += 100) { const q = qorex(); if (q) return q; await sleep(100); }
