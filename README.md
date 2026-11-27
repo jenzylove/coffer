@@ -166,7 +166,7 @@ On 17 Nov 2026 GitHub code search returned **2,284** public files containing `DO
 ## Develop
 
 ```bash
-npm install && npm test                    # 48 unit tests, no network
+npm install && npm test                    # 49 unit tests, no network
 cd contracts && forge install foundry-rs/forge-std --no-git && forge test   # 29 contract tests
 node scripts/log-replay.mts <identity file> <.env.coffer>   # the stolen laptop attack against the public record
 node contracts/script/vectors.ts           # regenerate the byte for byte test vectors from the TypeScript code
